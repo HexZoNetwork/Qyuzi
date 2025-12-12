@@ -1,0 +1,9 @@
+torch>=2.4.0
+tiktoken>=0.7.0
+wikipedia>=1.4.0
+duckduckgo-search>=6.3.0
+requests>=2.31.0
+lxml>=5.0.0
+tqdm
+accelerate
+rich
