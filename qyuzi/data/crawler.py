@@ -20,13 +20,12 @@ class EndlessCrawler(threading.Thread):
     def __init__(self, queue: Queue):
         super().__init__(daemon=True)
         self.queue = queue
-        self.topics = ["science", "history", "philosophy", "technology", "mathematics", "biology", "physics"]
+        self.topics = ["science", "history", "philosophy", "technology", "mathematics", "biology", "physics","earth","ai","brains","jobs","freelance","water","alchemy","asia","europe","minecraft","roblox","anime","luffy","science","china","world","abstraction","portugal"]
         self.black_list_patterns = [
-            r"porn", r"xxx", r"violence", r"hate speech" # Expanding this list is crucial for production
+            r"porn", r"xxx", r"violence", r"hate speech",r"pussy",r"xhamster",r"nude",r"fuck"
         ]
 
     def is_safe(self, text: str) -> bool:
-        # Basic regex content filter
         for pattern in self.black_list_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 return False
@@ -62,5 +61,4 @@ class EndlessCrawler(threading.Thread):
                 time.sleep(random.uniform(3, 10))
                 
             except Exception as e:
-                # Silently ignore crawl errors to correct thread
                 time.sleep(10)

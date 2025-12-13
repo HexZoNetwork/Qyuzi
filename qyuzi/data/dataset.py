@@ -18,12 +18,10 @@ class EndlessDataset(Dataset):
         self.queue = queue
         self.buffer = []
 
-    def __len__(self): 
-        # Infinite dataset concept
+    def __len__(self):
         return 1_000_000_000 
 
     def __getitem__(self, idx):
-        # 1. Fill Buffer if low
         tries = 0
         while len(self.buffer) < 10:
             try:
@@ -42,20 +40,14 @@ class EndlessDataset(Dataset):
                 if tries > 5:
                     if len(self.buffer) > 0:
                         break
-                    # Emergency fallback data to prevent crash
                     fallback = "Science is the systematic study of the structure and behavior of the physical and natural world. " * 5
                     self.buffer.append((torch.tensor(encode(fallback)), []))
                     break
             except Exception:
                 pass
-        
-        # 2. Sample from buffer
         chunk_data = random.choice(self.buffer)
-        chunk, img_urls = chunk_data # Consistent unpacking
-        
-        # 3. Random crop
+        chunk, img_urls = chunk_data
         if len(chunk) <= config.MAX_SEQ + 1:
-             # Padding or short return (handled by collator usually, but here we just slice carefully)
              seq = chunk
         else:
             i = random.randint(0, len(chunk) - config.MAX_SEQ - 1)
@@ -63,11 +55,9 @@ class EndlessDataset(Dataset):
             
         x = seq[:-1]
         y = seq[1:]
-        
-        # Pad if short (simple zero padding for now)
         if len(x) < config.MAX_SEQ:
             pad = torch.zeros(config.MAX_SEQ - len(x), dtype=torch.long)
             x = torch.cat([x, pad])
-            y = torch.cat([y, pad]) # -100 for ignore index would be better but keeping 0 for now as per legacy
+            y = torch.cat([y, pad])
             
-        return x, y, torch.empty(0) # Returning empty for images for now
+        return x, y, torch.empty(0)

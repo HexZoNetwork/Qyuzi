@@ -1,17 +1,15 @@
 import argparse
 import sys
 import os
-
-# Ensure the current directory is in the python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from train import train
 from generate import generate
 
 def main():
-    parser = argparse.ArgumentParser(description="Qyuzi AGI Entry Point")
+    parser = argparse.ArgumentParser(description="Qyuzi Entry Point")
     parser.add_argument('mode', nargs='?', choices=['train', 'generate', 'chat'], default='train', help='Mode to run: train, generate, or chat')
-    parser.add_argument('--prompt', type=str, default="The future of AGI is", help='Prompt for generation')
+    parser.add_argument('--prompt', type=str, default="hat is head dude?", help='Prompt for generation')
     
     args = parser.parse_args()
     

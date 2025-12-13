@@ -18,8 +18,6 @@ def generate(prompt: str, max_new=200, temperature=0.8, top_k=40):
     for _ in range(max_new):
         logits = model(ids, think_steps=config.THINK_STEPS_INFER)
         logits = logits[:, -1, :] / temperature
-        
-        # Top-K
         v, _ = torch.topk(logits, top_k)
         logits[logits < v[:, [-1]]] = -float('Inf')
         
@@ -34,7 +32,7 @@ def generate(prompt: str, max_new=200, temperature=0.8, top_k=40):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", type=str, default="The future of AGI is")
+    parser.add_argument("--prompt", type=str, default="What Is Skibidi?")
     args = parser.parse_args()
     
     generate(args.prompt)

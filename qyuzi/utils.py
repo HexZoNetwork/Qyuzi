@@ -14,9 +14,6 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def seed_everything(seed: int = 42):
-    """
-    Sets the seed for generating random numbers to allow for reproducible behavior.
-    """
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)

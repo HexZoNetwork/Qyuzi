@@ -6,9 +6,6 @@ from typing import Optional, Tuple
 from .config import config
 
 class RMSNorm(nn.Module):
-    """
-    Root Mean Square Layer Normalization.
-    """
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -21,9 +18,6 @@ class RMSNorm(nn.Module):
         return self._norm(x.float()).type_as(x) * self.weight
 
 class SwiGLUMLP(nn.Module):
-    """
-    SwiGLU Feed-Forward Network.
-    """
     def __init__(self, hidden_dim: int, ffn_dim: int):
         super().__init__()
         self.w1 = nn.Linear(hidden_dim, ffn_dim, bias=False)
@@ -34,9 +28,6 @@ class SwiGLUMLP(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class RotaryEmbedding(nn.Module):
-    """
-    Rotary Position Embeddings (RoPE).
-    """
     def __init__(self, dim: int, max_seq_len: int = 32768, base: float = 10000.0):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
@@ -53,8 +44,6 @@ class RotaryEmbedding(nn.Module):
     def forward(self, x: torch.Tensor, seq_len: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         if seq_len is None:
             seq_len = x.shape[1]
-        
-        # Auto-resize cache if sequence is longer than cached
         if seq_len > self.cos_cached.shape[0]:
              self._set_cos_sin_cache(seq_len)
              
@@ -72,9 +61,6 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
     return q_embed, k_embed
 
 class Context32KScaling(nn.Module):
-    """
-    Attention Mechanism with ALiBi and RoPE, utilizing Scaled Dot Product Attention.
-    """
     def __init__(self, hidden_dim: int, num_heads: int, max_seq_len: int = 32768):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -96,7 +82,6 @@ class Context32KScaling(nn.Module):
         relative_position = memory_position - context_position
         relative_position = relative_position.unsqueeze(0).expand(self.num_heads, -1, -1)
         alibi = relative_position * self.alibi_slopes.view(-1, 1, 1)
-        # return alibi [NH, T, T]
         return alibi
     
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -114,13 +99,12 @@ class Context32KScaling(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
-        alibi_bias = self.get_alibi_bias(T).to(q.device) # [NH, T, T]
-        attn_mask = alibi_bias.unsqueeze(0) # [1, NH, T, T]
+        alibi_bias = self.get_alibi_bias(T).to(q.device)
+        attn_mask = alibi_bias.unsqueeze(0)
         
         if mask is not None:
              if mask.dim() == 2:
                  mask = mask.unsqueeze(0).unsqueeze(0)
-             # Additive mask composition
              attn_mask = attn_mask + mask
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0 if not self.training else config.DROPOUT_RATE)
@@ -129,9 +113,6 @@ class Context32KScaling(nn.Module):
         return out
 
 class RecurrentGate(nn.Module):
-    """
-    GRU-like Gating for Recurrent Thinking Steps.
-    """
     def __init__(self, hidden_dim: int):
         super().__init__()
         self.gate = nn.Linear(hidden_dim * 2, hidden_dim)
@@ -139,7 +120,6 @@ class RecurrentGate(nn.Module):
         self.candidate = nn.Linear(hidden_dim * 2, hidden_dim)
         
     def forward(self, x: torch.Tensor, h_prev: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Fix for batch size mismatch during training vs inference or partial batches
         if h_prev is None or h_prev.shape[0] != x.shape[0]:
             h_prev = torch.zeros_like(x)
             

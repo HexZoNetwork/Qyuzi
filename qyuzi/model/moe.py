@@ -4,9 +4,6 @@ import torch.nn.functional as F
 from ..config import config
 
 class ScalableMoE(nn.Module):
-    """
-    Mixture of Experts Layer with GShard-style Load Balancing and Top-K Routing.
-    """
     def __init__(self, hidden_dim: int, ffn_dim: int, num_experts: int = 8, top_k: int = 2, expert_capacity_ratio: float = 1.25):
         super().__init__()
         self.num_experts = num_experts
@@ -34,13 +31,11 @@ class ScalableMoE(nn.Module):
         num_tokens = x_flat.size(0)
 
         router_logits = self.router(x_flat)
-        # Jitter noise for stability
         if self.training:
              router_logits = router_logits + torch.randn_like(router_logits) * config.MOE_JITTER_NOISE
              
         router_probs = F.softmax(router_logits, dim=-1)
         k_probs, k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        # Normalize probabilities for the selected top-k
         k_probs = k_probs / k_probs.sum(dim=-1, keepdim=True)
 
         if self.training:
@@ -48,46 +43,29 @@ class ScalableMoE(nn.Module):
                 batch_counts = torch.bincount(k_indices.view(-1), minlength=self.num_experts)
                 self.expert_counts += batch_counts.float()
                 self.total_tokens += num_tokens
-            # GShard prob sum tracking
             self.expert_prob_sum += router_probs.sum(0)
-
-        # Capacity enforcing
         capacity = int(self.expert_capacity_ratio * num_tokens * self.top_k / self.num_experts)
         capacity = max(4, capacity)
         indices_flat = k_indices.view(-1)
         sorted_indices, sort_map = torch.sort(indices_flat)
         counts = torch.bincount(sorted_indices, minlength=self.num_experts)
         counts_clamped = torch.clamp(counts, max=capacity)
-
         output = torch.zeros_like(x_flat)
-        
-        # Expert execution loop (Optimized for single-device simulation)
-        # In a real distributed setting, this would involve all-to-all dispatch
         start = 0
         for e in range(self.num_experts):
             count = counts[e].item()
             if count == 0:
                 continue
             clamped = counts_clamped[e].item()
-
-            # Gather tokens for expert e
             tokens = x_flat[sort_map[start:start + count]]
-            
-            # FFN computation
-            # Note: w1[e] is [H, FFN], tokens is [N, H] -> [N, FFN]
             h = F.silu(tokens @ self.w1[e]) 
             expert_out = h @ self.w2[e]
 
             if count > clamped:
-                # Drop overflow tokens
                 expert_out = expert_out[:clamped]
-
-            # Scatter results back
             positions = sort_map[start:start + clamped]
             output[positions] += expert_out
             start += count
-        
-        # Re-weight and sum top-k contributions
         weighted = output.view(num_tokens, self.top_k, H) * k_probs.unsqueeze(-1)
         final = weighted.sum(dim=1)
 

@@ -36,7 +36,6 @@ class UnifiedBlock(nn.Module):
 
     def _forward(self, x, mask=None):
         h = self.ln1(x)
-        # Checkpoint requires inputs to be tensors
         q, k, v = self.qkv(h).chunk(3, dim=-1)
         attn_out = self.attn_scale(q, k, v, mask=mask)
         x = x + self.dropout(self.proj(attn_out))
@@ -65,18 +64,12 @@ class QyuziUltimate(nn.Module):
 
         self.wm = ConsciousWorkingMemory(config.HIDDEN)
         self.causal = CausalEngine(config.HIDDEN)
-        
-        # Plugins
         self.snn = AdvancedSpikingNeuralNetwork(config.HIDDEN, config.HIDDEN) if config.ENABLE_SNN else None
         self.vsa = VectorSymbolicArchitecture(dim=10000, seed_dim=config.HIDDEN) if config.ENABLE_VSA else None
         self.dream = DreamConsolidationEngine(config.HIDDEN) if config.ENABLE_DREAM else None
         self.self_model = SelfModelingModule(config.HIDDEN) if config.ENABLE_SELFMODEL else None
         self.self_improvement = RecursiveSelfImprovement(config.HIDDEN) if config.ENABLE_AUTONOMY else None
-        
-        # Multimodal Stubs (For now, just placeholders to prevent errors if flags are on)
         self.vision_encoder = None 
-        # TODO: Port vision encoder and others if needed
-        
         self.recurrent_gate = RecurrentGate(config.HIDDEN)
         self.think_norm = RMSNorm(config.HIDDEN)
 
@@ -88,19 +81,13 @@ class QyuziUltimate(nn.Module):
     def forward(self, idx, think_steps=None, images=None):
         if think_steps is None: 
             think_steps = config.THINK_STEPS_TRAIN
-            
-        # Basic Multimodal Placeholder logic (To be expanded)
         if images is not None and self.vision_encoder is not None:
-             # Logic from original qyuzi.py would go here, simplified for now
              pass
         
         x = self.embed(idx)
         T = idx.shape[1]
-        
-        # Causal Mask Slicing
         active_mask = self.causal_mask[:T, :T]
         if active_mask.shape != (T, T):
-             # Just in case T > MAX_SEQ
              active_mask = torch.triu(torch.ones(T, T, device=x.device) * float('-inf'), diagonal=1)
 
         hidden_prev = None
@@ -108,8 +95,6 @@ class QyuziUltimate(nn.Module):
         for step in range(think_steps):
             for block in self.blocks:
                 x = block(x, mask=active_mask)
-            
-            # Recurrent improvements
             if self.snn:
                  snn_out = self.snn(x)
                  gate = torch.sigmoid(self.lm_head(snn_out))
@@ -117,10 +102,7 @@ class QyuziUltimate(nn.Module):
             
             x_recurrent = self.recurrent_gate(x.mean(dim=1), hidden_prev)
             hidden_prev = x_recurrent
-            # Broadcast scalar recurrent state to sequence
             x = x + x_recurrent.unsqueeze(1) * config.RECURRENT_RESIDUAL_SCALE
-            
-            # Working Memory
             wm_out = self.wm(x.mean(1))
             x = x + wm_out
             
@@ -131,10 +113,8 @@ class QyuziUltimate(nn.Module):
                 x[:, 3:] += config.CAUSAL_BRANCH_SCALE * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
             
             x = self.think_norm(x)
-            
-        # Post-Processing Plugins
         if self.dream and self.training:
-            importance = torch.rand(x.shape[0], T, device=x.device) # Placeholder importance
+            importance = torch.rand(x.shape[0], T, device=x.device)
             self.dream.store_experience(x.detach(), importance)
 
         return self.lm_head(self.norm(x))

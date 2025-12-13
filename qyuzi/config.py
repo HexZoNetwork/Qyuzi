@@ -52,11 +52,8 @@ class StageConfig:
     }
 
 class Config:
-    # Environment
     ACTIVE_STAGE = os.getenv("QYUZI_STAGE", "f")
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    # Model Specs
     stage_cfg = StageConfig.STAGES[ACTIVE_STAGE]
     VERSION = ACTIVE_STAGE
     VOCAB_SIZE = 100352
@@ -67,13 +64,9 @@ class Config:
     USE_MOE = stage_cfg["use_moe"]
     NUM_EXPERTS = stage_cfg.get("num_experts", 8)
     EXPERTS_ACTIVE = stage_cfg.get("experts_active", 2)
-    
-    # Context & Positional
     MAX_SEQ = 8192
     ROPE_THETA = 10000.0
     ROPE_SCALING_FACTOR = 1.0
-    
-    # Training Hyperparams
     USE_RECURRENT_THINKING = os.getenv("QYUZI_RECURRENT", "0") == "1" 
     THINK_STEPS_TRAIN = 1 if USE_RECURRENT_THINKING else 3
     THINK_STEPS_INFER = 1 if USE_RECURRENT_THINKING else 5
@@ -82,15 +75,11 @@ class Config:
     LR = 1.5e-4 if HIDDEN > 1024 else 2e-4
     WEIGHT_DECAY = 0.01
     WARMUP_STEPS = 1000
-    
-    # Data & I/O
     USE_REAL_DATASETS = os.getenv("QYUZI_REAL_DATA", "1") == "1"
     DATASET_NAME = os.getenv("QYUZI_DATASET", "HuggingFaceFW/fineweb-edu")
     DEDUP_CACHE_SIZE = 100000
     SAVE_INTERVAL = 1000
     CHECKPOINT_DIR = "qyuzi_checkpoints"
-    
-    # Features / Flags
     ENABLE_CHECKPOINTING = os.getenv("QYUZI_CHECKPOINTING", "1") == "1"
     ENABLE_SNN = os.getenv("QYUZI_SNN", "0") == "1"
     ENABLE_VSA = os.getenv("QYUZI_VSA", "0") == "1"
@@ -100,8 +89,6 @@ class Config:
     ENABLE_AUDIO = os.getenv("QYUZI_AUDIO", "0") == "1"
     ENABLE_VIDEO = os.getenv("QYUZI_VIDEO", "0") == "1"
     ENABLE_AUTONOMY = os.getenv("QYUZI_AUTONOMY", "0") == "1"
-
-    # Magic Numbers / Constants (Refactored from inline)
     MOE_JITTER_NOISE = 0.01
     MOE_LOAD_BALANCE_WEIGHT = 0.01
     DREAM_LOSS_WEIGHT = 0.001
@@ -109,7 +96,7 @@ class Config:
     SNN_FEEDBACK_SCALE = 0.1
     VSA_CONTEXT_SCALE = 0.05
     RECURRENT_RESIDUAL_SCALE = 0.1
-    WM_SCALE = 1.0 # Indirectly 1.0 in original code (x + wm_out)
+    WM_SCALE = 1.0
     CAUSAL_BRANCH_SCALE = 0.15
     INIT_STD = 0.02
     DROPOUT_RATE = 0.1
