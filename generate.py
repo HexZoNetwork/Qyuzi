@@ -1,9 +1,19 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+
 import torch
 import torch.nn.functional as F
 import argparse
 from qyuzi.config import config
 from qyuzi.model.transformer import QyuziUltimate
-from qyuzi.data.dataset import encode, decode
+try:
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+    def encode(text): return enc.encode(text)
+    def decode(ids): return enc.decode(ids)
+except ImportError:
+    from qyuzi.data.dataset import encode, decode
 
 @torch.inference_mode()
 def generate(prompt: str, max_new=200, temperature=0.8, top_k=40):

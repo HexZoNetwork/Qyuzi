@@ -56,7 +56,13 @@ class Config:
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     stage_cfg = StageConfig.STAGES[ACTIVE_STAGE]
     VERSION = ACTIVE_STAGE
-    VOCAB_SIZE = 100352
+    try:
+        import tiktoken
+        tokenizer = tiktoken.get_encoding("cl100k_base")
+        VOCAB_SIZE = tokenizer.n_vocab
+    except ImportError:
+        VOCAB_SIZE = 100352
+        
     HIDDEN = stage_cfg["hidden"]
     NUM_LAYERS = stage_cfg["layers"]
     NUM_HEADS = stage_cfg["heads"]

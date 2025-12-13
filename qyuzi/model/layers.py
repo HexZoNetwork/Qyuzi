@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
-from .config import config
+from qyuzi.config import config
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -107,7 +107,12 @@ class Context32KScaling(nn.Module):
                  mask = mask.unsqueeze(0).unsqueeze(0)
              attn_mask = attn_mask + mask
 
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0 if not self.training else config.DROPOUT_RATE)
+        out = F.scaled_dot_product_attention(
+            q, k, v, 
+            attn_mask=attn_mask, 
+            dropout_p=config.DROPOUT_RATE if self.training else 0.0,
+            is_causal=False
+        )
         
         out = out.transpose(1, 2).contiguous().view(B, T, H)
         return out

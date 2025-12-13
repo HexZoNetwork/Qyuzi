@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ..config import config
+from qyuzi.config import config
 
 class ScalableMoE(nn.Module):
     def __init__(self, hidden_dim: int, ffn_dim: int, num_experts: int = 8, top_k: int = 2, expert_capacity_ratio: float = 1.25):
@@ -46,10 +46,12 @@ class ScalableMoE(nn.Module):
             self.expert_prob_sum += router_probs.sum(0)
         capacity = int(self.expert_capacity_ratio * num_tokens * self.top_k / self.num_experts)
         capacity = max(4, capacity)
+        
         indices_flat = k_indices.view(-1)
         sorted_indices, sort_map = torch.sort(indices_flat)
         counts = torch.bincount(sorted_indices, minlength=self.num_experts)
         counts_clamped = torch.clamp(counts, max=capacity)
+        
         output = torch.zeros_like(x_flat)
         start = 0
         for e in range(self.num_experts):
@@ -57,15 +59,24 @@ class ScalableMoE(nn.Module):
             if count == 0:
                 continue
             clamped = counts_clamped[e].item()
-            tokens = x_flat[sort_map[start:start + count]]
+            
+            if count > clamped:
+                keep = torch.randperm(count, device=x.device)[:clamped]
+                
+                tokens = x_flat[sort_map[start:start + count][keep]]
+                positions = sort_map[start:start + count][keep]
+            else:
+                tokens = x_flat[sort_map[start:start + count]]
+                positions = sort_map[start:start + clamped]
+
             h = F.silu(tokens @ self.w1[e]) 
             expert_out = h @ self.w2[e]
+            
+            # Index add safe
+            output.index_add_(0, positions, expert_out)
 
-            if count > clamped:
-                expert_out = expert_out[:clamped]
-            positions = sort_map[start:start + clamped]
-            output[positions] += expert_out
             start += count
+            
         weighted = output.view(num_tokens, self.top_k, H) * k_probs.unsqueeze(-1)
         final = weighted.sum(dim=1)
 
@@ -75,5 +86,6 @@ class ScalableMoE(nn.Module):
         if self.total_tokens > 0:
             f_i = self.expert_counts / (self.total_tokens + 1e-6)
             P_i = self.expert_prob_sum / (self.total_tokens + 1e-6)
-            return self.num_experts * torch.sum(f_i * P_i)
+            var_f = torch.var(f_i)
+            return self.num_experts * torch.sum(f_i * P_i) + 0.05 * var_f
         return torch.tensor(0.0, device=self.w1.device)

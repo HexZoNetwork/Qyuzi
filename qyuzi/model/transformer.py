@@ -5,11 +5,10 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 import json
 from datetime import datetime
-
-from ..config import config
-from .layers import RMSNorm, SwiGLUMLP, Context32KScaling, RecurrentGate
-from .moe import ScalableMoE
-from .modules import (
+from qyuzi.config import config
+from qyuzi.model.layers import RMSNorm, SwiGLUMLP, Context32KScaling, RecurrentGate
+from qyuzi.model.moe import ScalableMoE
+from qyuzi.model.modules import (
     AdvancedSpikingNeuralNetwork, VectorSymbolicArchitecture, DreamConsolidationEngine,
     SelfModelingModule, RecursiveSelfImprovement, ConsciousWorkingMemory, CausalEngine
 )
@@ -55,7 +54,6 @@ class QyuziUltimate(nn.Module):
         ])
         
         self.moe_layers = [block.moe for block in self.blocks if hasattr(block, 'moe')]
-        
         self.register_buffer("causal_mask", torch.triu(torch.ones(config.MAX_SEQ, config.MAX_SEQ) * float('-inf'), diagonal=1))
         
         self.norm = RMSNorm(config.HIDDEN)
@@ -69,7 +67,18 @@ class QyuziUltimate(nn.Module):
         self.dream = DreamConsolidationEngine(config.HIDDEN) if config.ENABLE_DREAM else None
         self.self_model = SelfModelingModule(config.HIDDEN) if config.ENABLE_SELFMODEL else None
         self.self_improvement = RecursiveSelfImprovement(config.HIDDEN) if config.ENABLE_AUTONOMY else None
-        self.vision_encoder = None 
+        if config.ENABLE_MULTIMODAL:
+             try:
+                 import open_clip
+                 self.vision_encoder, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+                 for param in self.vision_encoder.parameters(): param.requires_grad = False
+                 self.vision_proj = nn.Linear(512, config.HIDDEN)
+             except ImportError:
+                 print("OpenCLIP not found. Multimodal disabled.")
+                 self.vision_encoder = None
+        else:
+             self.vision_encoder = None
+             
         self.recurrent_gate = RecurrentGate(config.HIDDEN)
         self.think_norm = RMSNorm(config.HIDDEN)
 
@@ -81,20 +90,29 @@ class QyuziUltimate(nn.Module):
     def forward(self, idx, think_steps=None, images=None):
         if think_steps is None: 
             think_steps = config.THINK_STEPS_TRAIN
-        if images is not None and self.vision_encoder is not None:
-             pass
-        
         x = self.embed(idx)
-        T = idx.shape[1]
+        if config.ENABLE_MULTIMODAL and images is not None and self.vision_encoder is not None:
+             with torch.no_grad():
+                 img_feat = self.vision_encoder.encode_image(images)
+             img_emb = self.vision_proj(img_feat).unsqueeze(1)
+             x = torch.cat([img_emb, x], dim=1)
+        
+        T = x.shape[1]
         active_mask = self.causal_mask[:T, :T]
         if active_mask.shape != (T, T):
              active_mask = torch.triu(torch.ones(T, T, device=x.device) * float('-inf'), diagonal=1)
 
         hidden_prev = None
+        tau = 3.0
         
         for step in range(think_steps):
-            for block in self.blocks:
-                x = block(x, mask=active_mask)
+            alpha = torch.exp(torch.tensor(-step / tau, device=x.device))
+            for i, block in enumerate(self.blocks):
+                if self.training and config.ENABLE_CHECKPOINTING and i % 4 == 0:
+                     x = torch.utils.checkpoint.checkpoint(block, x, active_mask, use_reentrant=False)
+                else:
+                     x = block(x, mask=active_mask)
+
             if self.snn:
                  snn_out = self.snn(x)
                  gate = torch.sigmoid(self.lm_head(snn_out))
@@ -102,7 +120,8 @@ class QyuziUltimate(nn.Module):
             
             x_recurrent = self.recurrent_gate(x.mean(dim=1), hidden_prev)
             hidden_prev = x_recurrent
-            x = x + x_recurrent.unsqueeze(1) * config.RECURRENT_RESIDUAL_SCALE
+            x = x + alpha * (x_recurrent.unsqueeze(1) * config.RECURRENT_RESIDUAL_SCALE)
+            
             wm_out = self.wm(x.mean(1))
             x = x + wm_out
             
@@ -113,9 +132,10 @@ class QyuziUltimate(nn.Module):
                 x[:, 3:] += config.CAUSAL_BRANCH_SCALE * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
             
             x = self.think_norm(x)
+            
         if self.dream and self.training:
             importance = torch.rand(x.shape[0], T, device=x.device)
-            self.dream.store_experience(x.detach(), importance)
+            self.dream.store_experience(x.detach(), importance, vsa=self.vsa)
 
         return self.lm_head(self.norm(x))
 
@@ -127,6 +147,9 @@ class QyuziUltimate(nn.Module):
         }
         if optimizer: checkpoint['optimizer_state'] = optimizer.state_dict()
         
+        if not os.path.exists(config.CHECKPOINT_DIR):
+            os.makedirs(config.CHECKPOINT_DIR)
+            
         path = os.path.join(config.CHECKPOINT_DIR, f"qyuzi_{config.VERSION}_step{step}.pt")
         torch.save(checkpoint, path)
         latest_path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
@@ -136,7 +159,7 @@ class QyuziUltimate(nn.Module):
         if path is None: path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
         if os.path.exists(path):
             checkpoint = torch.load(path, map_location=config.DEVICE)
-            self.load_state_dict(checkpoint['model_state'])
+            self.load_state_dict(checkpoint['model_state'], strict=False)
             print(f"Loaded checkpoint from {path}")
             return checkpoint
         return None

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from ..config import config
+from qyuzi.config import config
 
 # --- SNN Components ---
 class SurrogateSpike(torch.autograd.Function):
@@ -35,7 +35,13 @@ class SpikingNeuronLayer(nn.Module):
         spikes = []
         for t in range(T):
             mem = self.alpha * mem + self.fc(x[:, t])
-            threshold = self.threshold_adapt.unsqueeze(0)
+            # Adaptive threshold: avoid NaN if batch size is 1 by setting unbiased=False or checking dim
+            if B > 1:
+                mem_std = mem.std(dim=-1, keepdim=True)
+            else:
+                mem_std = torch.zeros_like(mem[:, 0:1])
+                
+            threshold = self.threshold_adapt.unsqueeze(0) + 0.1 * mem_std
             spike = SurrogateSpike.apply(mem, threshold)
             mem = mem * (1 - spike)
             spikes.append(spike)
@@ -83,16 +89,18 @@ class VectorSymbolicArchitecture(nn.Module):
         refined = self.resonator(x)
         return F.normalize(refined, dim=-1)
     
-    def forward(self, concept_a, concept_b, operation='bind'):
+    def forward(self, concept_a, concept_b=None, operation='bind'):
         hv_a = self.project_up(concept_a)
-        hv_b = self.project_up(concept_b)
-        if operation == 'bind':
-            result = self.bind(hv_a, hv_b)
-        elif operation == 'bundle':
-            result = F.normalize(hv_a + hv_b, dim=-1)
+        if concept_b is not None:
+            hv_b = self.project_up(concept_b)
+            if operation == 'bind':
+                result = self.bind(hv_a, hv_b)
+            elif operation == 'bundle':
+                result = F.normalize(hv_a + hv_b, dim=-1)
+            else:
+                result = self.bind(hv_a, hv_b)
         else:
-             # Fallback
-             result = self.bind(hv_a, hv_b)
+            result = hv_a
              
         result = self.cleanup(result)
         return self.project_down(result)
@@ -105,19 +113,20 @@ class VectorSymbolicArchitecture(nn.Module):
         codebook_norm = F.normalize(self.codebook.weight, dim=-1)
         query_norm = F.normalize(query_hv, dim=-1)
         sim = torch.matmul(query_norm, codebook_norm.T)
-        matches = (sim > threshold)
         return sim
+import threading
 
-# --- Dream Engine ---
 class DreamConsolidationEngine(nn.Module):
     def __init__(self, hidden_dim, memory_size=50000, compression_ratio=4, num_dream_cycles=10):
         super().__init__()
         self.memory_size = memory_size
         self.compressed_dim = hidden_dim // compression_ratio
         self.num_dream_cycles = num_dream_cycles
-        self.register_buffer('episodic_memory', torch.zeros(memory_size, hidden_dim))
-        self.register_buffer('memory_importance', torch.zeros(memory_size))
+        # Offload to CPU
+        self.episodic_memory = torch.zeros(memory_size, hidden_dim, device='cpu')
+        self.memory_importance = torch.zeros(memory_size, device='cpu')
         self.write_ptr = 0
+        
         self.encoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.LayerNorm(hidden_dim // 2),
@@ -132,25 +141,30 @@ class DreamConsolidationEngine(nn.Module):
         )
         self.world_model = nn.GRU(hidden_dim, hidden_dim, num_layers=2, batch_first=True)
         
-    def store_experience(self, hidden_states, importance=None):
+    def store_experience(self, hidden_states, importance=None, vsa=None):
         B, T, H = hidden_states.shape
         states_flat = hidden_states.view(-1, H)
         if importance is None:
             importance = torch.ones(states_flat.size(0), device=states_flat.device)
         else:
             importance = importance.view(-1).clamp(0.0, 5.0)
-            
-        with torch.no_grad():
-            for i in range(min(states_flat.size(0), self.memory_size)):
-                idx = self.write_ptr % self.memory_size
-                self.episodic_memory[idx] = states_flat[i]
-                self.memory_importance[idx] = importance[i]
-                self.write_ptr += 1
+        if vsa is not None:
+             states_flat = vsa(states_flat, operation='cleanup')
+        states_cpu = states_flat.detach().cpu()
+        imp_cpu = importance.detach().cpu()
+        num_items = states_cpu.size(0)
+        indices = [(self.write_ptr + i) % self.memory_size for i in range(num_items)]
+        for i, idx in enumerate(indices):
+             self.episodic_memory[idx] = states_cpu[i]
+             self.memory_importance[idx] = imp_cpu[i]
+        self.write_ptr += num_items
     
-    def dream(self, num_samples=100):
+    def dream(self, num_samples=100, device='cuda'):
+        if self.write_ptr == 0: return torch.tensor(0.0, device=device)
+        
         probs = F.softmax(self.memory_importance, dim=0)
         idx = torch.multinomial(probs, num_samples, replacement=True)
-        samples = self.episodic_memory[idx]
+        samples = self.episodic_memory[idx].to(device)
         
         encoded = self.encoder(samples)
         mu, logvar = encoded.chunk(2, dim=-1)
@@ -164,22 +178,26 @@ class DreamConsolidationEngine(nn.Module):
         recon_loss = F.mse_loss(reconstructed, samples, reduction='none').mean(dim=-1)
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
         world_loss = F.mse_loss(world_output.squeeze(0), samples, reduction='none').mean(dim=-1)
-        
         total_error = recon_loss + 0.1 * world_loss + 0.001 * kl_loss
-        
         with torch.no_grad():
-             self.memory_importance[idx] = 0.9 * self.memory_importance[idx] + 0.1 * total_error.detach()
-
+             err_cpu = total_error.detach().cpu()
+             self.memory_importance[idx] = 0.9 * self.memory_importance[idx] + 0.1 * err_cpu
         return total_error.mean()
     
     def consolidate(self):
         total_loss = 0.0
+        device = next(self.parameters()).device
         for _ in range(self.num_dream_cycles):
-            loss = self.dream(num_samples=128)
+            loss = self.dream(num_samples=128, device=device)
             total_loss += loss
         return total_loss / self.num_dream_cycles
 
-# --- Other Modules Stubs (Simplified for Refactor) ---
+    def consolidate_async(self):
+        def _job():
+            with torch.no_grad():
+                self.consolidate()
+        threading.Thread(target=_job).start()
+
 class ConsciousWorkingMemory(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
@@ -190,11 +208,9 @@ class ConsciousWorkingMemory(nn.Module):
         scores = self.gate(x.mean(dim=1, keepdim=True))
         attn = F.softmax(scores, -1) @ self.slots
         mean_x = x.mean(dim=(0,1))
-        # Moving average update of slots
         with torch.no_grad():
             self.slots.data.copy_(0.99 * self.slots.data + 0.01 * mean_x.unsqueeze(0).repeat(9,1))
         return attn.unsqueeze(1)
-
 class CausalEngine(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
