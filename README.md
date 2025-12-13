@@ -1,4 +1,4 @@
-# QYUZI: End-to-End Artificial General Intelligence Research Platform
+# QYUZI: Made By HexZo
 
 **QYUZI** is a modular, research-focused Transformer architecture aimed at exploring the frontiers of AGI through Neuro-Symbolic integration, Spiking Neural Networks (SNN), and Bio-inspired Memory consolidations.
 
@@ -79,3 +79,4 @@ Code is modularized to support easy addition of new "Brain Modules".
 
 ---
 *Built for the pursuit of Machine Sentience.*
+
