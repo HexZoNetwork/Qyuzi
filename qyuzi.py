@@ -97,7 +97,7 @@ class Config:
     stage_cfg = StageConfig.STAGES[ACTIVE_STAGE]
     VERSION = ACTIVE_STAGE
     
-    VOCAB_SIZE = 131072
+    VOCAB_SIZE = 100352
     HIDDEN = stage_cfg["hidden"]
     NUM_LAYERS = stage_cfg["layers"]
     NUM_HEADS = stage_cfg["heads"]
@@ -106,7 +106,7 @@ class Config:
     NUM_EXPERTS = stage_cfg.get("num_experts", 8)
     EXPERTS_ACTIVE = stage_cfg.get("experts_active", 2)
     
-    MAX_SEQ = 2048
+    MAX_SEQ = 8192
     ROPE_THETA = 10000.0
     ROPE_SCALING_FACTOR = 1.0
     USE_RECURRENT_THINKING = os.getenv("QYUZI_RECURRENT", "0") == "1" 
@@ -131,6 +131,8 @@ class Config:
     ENABLE_DREAM = os.getenv("QYUZI_DREAM", "0") == "1"
     ENABLE_SELFMODEL = os.getenv("QYUZI_SELFMODEL", "0") == "1"
     ENABLE_MULTIMODAL = os.getenv("QYUZI_MULTIMODAL", "0") == "1"
+    ENABLE_AUDIO = os.getenv("QYUZI_AUDIO", "0") == "1"
+    ENABLE_VIDEO = os.getenv("QYUZI_VIDEO", "0") == "1"
     ENABLE_AUTONOMY = os.getenv("QYUZI_AUTONOMY", "0") == "1"
 
 config = Config()
@@ -183,7 +185,8 @@ class ConsciousWorkingMemory(nn.Module):
         scores = self.gate(x.mean(dim=1, keepdim=True))
         attn = F.softmax(scores, -1) @ self.slots
         mean_x = x.mean(dim=(0,1))
-        self.slots.data = 0.99 * self.slots.data + 0.01 * mean_x.unsqueeze(0).repeat(9,1)
+        with torch.no_grad():
+            self.slots.data.copy_(0.99 * self.slots.data + 0.01 * mean_x.unsqueeze(0).repeat(9,1))
         return attn.unsqueeze(1)
 
 class CausalEngine(nn.Module):
@@ -215,7 +218,6 @@ class MoELayer(nn.Module):
     def forward(self, x):
         B, T, H = x.shape
         x_flat = x.view(-1, H)
-        N = x_flat.shape[0]
         
         router_logits = self.router(x_flat)
         if self.training:
@@ -225,155 +227,57 @@ class MoELayer(nn.Module):
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
         top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
         
-        output = torch.zeros_like(x_flat)
+        flat_indices = top_k_indices.view(-1)
+        flat_weights = top_k_probs.view(-1)
         
-        capacity = max(1, int(self.capacity_factor * N / self.num_experts * self.top_k))
+        x_repeated = x_flat.repeat_interleave(self.top_k, dim=0)
         
-        for k in range(self.top_k):
-            expert_ids = top_k_indices[:, k]
-            weights = top_k_probs[:, k].unsqueeze(-1)
-            
-            for expert_id in range(self.num_experts):
-                mask = (expert_ids == expert_id)
-                if not mask.any():
-                    continue
+        sorted_indices, sort_map = torch.sort(flat_indices)
+        
+        output_repeated = torch.zeros_like(x_repeated)
+        
+        expert_counts = torch.bincount(flat_indices, minlength=self.num_experts)
+        self.expert_counts += expert_counts.detach().float()
+
+        start_idx = 0
+        for i in range(self.num_experts):
+            count = expert_counts[i].item()
+            if count > 0:
+                end_idx = start_idx + count
+                idx_slice = sort_map[start_idx:end_idx]
+                tokens = x_repeated[idx_slice]
+                h = F.gelu(tokens @ self.w1[i])
+                h = h @ self.w2[i]
                 
-                # Get tokens for this expert
-                mask_indices = torch.nonzero(mask).squeeze(-1)
+                output_repeated[idx_slice] = h
                 
-                # Apply capacity limit
-                if mask_indices.shape[0] > capacity:
-                    mask_indices = mask_indices[:capacity]
-                
-                if mask_indices.shape[0] == 0:
-                    continue
-                
-                tokens = x_flat[mask_indices]
-                
-                h = torch.einsum('nh,hf->nf', tokens, self.w1[expert_id])
-                h = F.gelu(h)
-                h = torch.einsum('nf,fh->nh', h, self.w2[expert_id])
-                
-                output[mask_indices] += weights[mask_indices] * h
-                self.expert_counts[expert_id] += mask_indices.shape[0]
+                start_idx = end_idx
+        
+        output_repeated = output_repeated * flat_weights.unsqueeze(-1)
+        output_repeated = output_repeated.view(B*T, self.top_k, H)
+        output = output_repeated.sum(dim=1)
         
         return output.view(B, T, H)
     
     def load_balancing_loss(self):
-        counts_norm = self.expert_counts / (self.expert_counts.sum() + 1e-10)
-        target = torch.ones_like(counts_norm) / self.num_experts
-        return F.mse_loss(counts_norm, target)
-
-class QyuziLamborghini(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.embed = nn.Embedding(config.VOCAB_SIZE, config.HIDDEN)
-        self.pos = nn.Embedding(config.MAX_SEQ, config.HIDDEN)
-        
-        self.blocks = nn.ModuleList([nn.TransformerEncoderLayer(
-            config.HIDDEN, 
-            config.NUM_HEADS, 
-            dim_feedforward=config.FFN_DIM,
-            batch_first=True, 
-            activation='gelu', 
-            dropout=0.1
-        ) for _ in range(config.NUM_LAYERS)])
-        
-        self.norm = nn.LayerNorm(config.HIDDEN)
-        self.lm_head = nn.Linear(config.HIDDEN, config.VOCAB_SIZE, bias=False)
-        self.lm_head.weight = self.embed.weight
-
-        self.wm = ConsciousWorkingMemory(config.HIDDEN)
-        self.causal = CausalEngine(config.HIDDEN)
-
-        total_params = sum(p.numel() for p in self.parameters())
-        print(f"🏎️  LAMBORGHINI ({config.VERSION}) ready — {total_params:,} params ({total_params/1e6:.1f}M)")
-    
-    def save_checkpoint(self, step, loss, optimizer=None):
-        checkpoint = {
-            'step': step,
-            'loss': loss,
-            'model_state': self.state_dict(),
-            'config': vars(config),
-            'timestamp': datetime.now().isoformat(),
-            'version': config.VERSION
-        }
-        if optimizer:
-            checkpoint['optimizer_state'] = optimizer.state_dict()
-        
-        path = os.path.join(config.CHECKPOINT_DIR, f"qyuzi_{config.VERSION}_step{step}.pt")
-        torch.save(checkpoint, path)
-        
-        latest_path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
-        torch.save(checkpoint, latest_path)
-        
-        meta_path = os.path.join(config.CHECKPOINT_DIR, "metadata.json")
-        metadata = {
-            'latest_step': step,
-            'latest_loss': loss,
-            'version': config.VERSION,
-            'timestamp': checkpoint['timestamp'],
-            'total_params': sum(p.numel() for p in self.parameters())
-        }
-        with open(meta_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"The Another One: step {step}, loss {loss:.4f}")
-    
-    def load_checkpoint(self, path=None):
-        if path is None:
-            path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
-        
-        if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=config.DEVICE)
-            self.load_state_dict(checkpoint['model_state'])
-            print(f"Anadar load")
-            return checkpoint
-        else:
-            print(f"Fresh?")
-            return None
-
-    def forward(self, idx, think_steps=None):
-        if think_steps is None: think_steps = config.THINK_STEPS_TRAIN
-        B, T = idx.shape
-        x = self.embed(idx) + self.pos(torch.arange(T, device=idx.device))
-
-        for step in range(think_steps):
-            for block in self.blocks:
-                x = block(x)
-            wm_out = self.wm(x.mean(1))
-            x = x + wm_out.unsqueeze(1)
-
-            if T > 3:
-                c = x[:, :-3].mean(1)
-                e = x[:, 3:].mean(1)
-                prob = self.causal(c, e)[:, 1]  # prob a→b
-                x[:, 3:] += 0.08 * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
-
-        return self.lm_head(self.norm(x))
+        pass
+        counts = self.expert_counts / (self.expert_counts.sum() + 1e-10)
+        target = 1.0 / self.num_experts
+        loss = F.mse_loss(counts, torch.full_like(counts, target))
+        self.expert_counts.data.mul_(0.95)
+        return loss
 
 class QyuziUltimate(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed = nn.Embedding(config.VOCAB_SIZE, config.HIDDEN)
-        self.pos = nn.Embedding(config.MAX_SEQ, config.HIDDEN)
+        self.blocks = nn.ModuleList([
+            self._build_unified_block() for _ in range(config.NUM_LAYERS)
+        ])
         
-        if config.USE_MOE:
-            print(f"⚡ ScalableMoE: {config.NUM_EXPERTS} experts, top-{config.EXPERTS_ACTIVE}")
-            self.blocks = nn.ModuleList([
-                self._build_scalable_moe_block() for _ in range(config.NUM_LAYERS)
-            ])
-            self.moe_layers = [block.moe for block in self.blocks if hasattr(block, 'moe')]
-        else:
-            self.blocks = nn.ModuleList([nn.TransformerEncoderLayer(
-                config.HIDDEN,
-                config.NUM_HEADS,
-                dim_feedforward=config.FFN_DIM,
-                batch_first=True,
-                activation='gelu',
-                dropout=0.1
-            ) for _ in range(config.NUM_LAYERS)])
-            self.moe_layers = []
+        self.moe_layers = [block.moe for block in self.blocks if hasattr(block, 'moe')]
+        
+        self.register_buffer("causal_mask", torch.triu(torch.ones(config.MAX_SEQ, config.MAX_SEQ) * float('-inf'), diagonal=1))
         
         self.norm = nn.LayerNorm(config.HIDDEN)
         self.lm_head = nn.Linear(config.HIDDEN, config.VOCAB_SIZE, bias=False)
@@ -386,19 +290,19 @@ class QyuziUltimate(nn.Module):
         
         if config.ENABLE_SNN:
             self.snn = AdvancedSpikingNeuralNetwork(config.HIDDEN, config.HIDDEN, num_layers=3)
-            print("✅ SNN co-processor")
+            print("✅ SNN")
         else:
             self.snn = None
         
         if config.ENABLE_VSA:
             self.vsa = VectorSymbolicArchitecture(dim=10000, seed_dim=config.HIDDEN, num_symbols=1000)
-            print("✅ VSA 10K hypervectors")
+            print("✅ VSA")
         else:
             self.vsa = None
         
         if config.ENABLE_DREAM:
             self.dream = DreamConsolidationEngine(config.HIDDEN, memory_size=50000, num_dream_cycles=10)
-            print("✅ Dream 50K memory")
+            print("✅ Dream")
         else:
             self.dream = None
         
@@ -410,11 +314,31 @@ class QyuziUltimate(nn.Module):
         
         if config.ENABLE_MULTIMODAL:
             self.vision_encoder = ScalableVisionEncoder(config.HIDDEN, max_image_size=1024)
-            self.multimodal_fusion = MultiModalReasoningFusion(config.HIDDEN, num_modalities=4)
-            print("✅ Multi-modal Vision+Fusion")
+            self.vision_proj = nn.Linear(config.HIDDEN, config.HIDDEN, bias=False)
+            self.img_token = nn.Parameter(torch.zeros(1, 1, config.HIDDEN))
+            self.image_placeholder = nn.Parameter(torch.zeros(1, 1, config.HIDDEN))
+            print("✅ Vision Active")
         else:
             self.vision_encoder = None
-            self.multimodal_fusion = None
+
+        if config.ENABLE_AUDIO:
+            from qyuzi_engine import MultiModalAudioEncoder
+            self.audio_encoder = MultiModalAudioEncoder(config.HIDDEN)
+            print("✅ Audio Active")
+        else:
+            self.audio_encoder = None
+            
+        if config.ENABLE_VIDEO:
+            from qyuzi_engine import VideoUnderstandingModule
+            self.video_encoder = VideoUnderstandingModule(config.HIDDEN)
+            print("✅ Video Active")
+        else:
+            self.video_encoder = None
+            
+        if self.vision_encoder or self.audio_encoder or self.video_encoder:
+             self.multimodal_fusion = MultiModalReasoningFusion(config.HIDDEN, num_modalities=4)
+        else:
+             self.multimodal_fusion = None
         
         if config.ENABLE_AUTONOMY:
             self.self_improvement = RecursiveSelfImprovement(config.HIDDEN, num_iterations=5)
@@ -423,6 +347,7 @@ class QyuziUltimate(nn.Module):
             self.self_improvement = None
         
         self.recurrent_gate = RecurrentGate(config.HIDDEN)
+        self.think_norm = nn.LayerNorm(config.HIDDEN)
 
         total_params = sum(p.numel() for p in self.parameters())
         active_params = self._estimate_active_params() if config.USE_MOE else total_params
@@ -433,43 +358,39 @@ class QyuziUltimate(nn.Module):
             print(f"   Active: {active_params:,} ({active_params/1e6:.1f}M)")
         print(f"   Context: {config.MAX_SEQ} tokens\n")
     
-    def _build_scalable_moe_block(self):
-        class MoEBlock(nn.Module):
+    def _build_unified_block(self):
+        class UnifiedBlock(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.self_attn = nn.MultiheadAttention(config.HIDDEN, config.NUM_HEADS, batch_first=True)
-                self.moe = ScalableMoE(config.HIDDEN, config.FFN_DIM, config.NUM_EXPERTS, config.EXPERTS_ACTIVE)
-                self.norm1 = nn.LayerNorm(config.HIDDEN)
-                self.norm2 = nn.LayerNorm(config.HIDDEN)
+                self.ln1 = nn.LayerNorm(config.HIDDEN)
+                self.qkv = nn.Linear(config.HIDDEN, config.HIDDEN*3, bias=False)
+                self.attn_scale = Context32KScaling(config.HIDDEN, config.NUM_HEADS, max_seq_len=config.MAX_SEQ)
+                self.proj = nn.Linear(config.HIDDEN, config.HIDDEN, bias=False)
                 self.dropout = nn.Dropout(0.1)
+                
+                self.ln2 = nn.LayerNorm(config.HIDDEN)
+                if config.USE_MOE:
+                    self.moe = ScalableMoE(config.HIDDEN, config.FFN_DIM, config.NUM_EXPERTS, config.EXPERTS_ACTIVE)
+                else:
+                    self.mlp = nn.Sequential(
+                        nn.Linear(config.HIDDEN, config.FFN_DIM),
+                        nn.GELU(),
+                        nn.Linear(config.FFN_DIM, config.HIDDEN),
+                        nn.Dropout(0.1)
+                    )
             
-            def forward(self, x):
-                attn_out, _ = self.self_attn(x, x, x)
-                x = self.norm1(x + self.dropout(attn_out))
-                moe_out = self.moe(x)
-                x = self.norm2(x + self.dropout(moe_out))
+            def forward(self, x, mask=None):
+                h = self.ln1(x)
+                q, k, v = self.qkv(h).chunk(3, dim=-1)
+                attn_out = self.attn_scale(q, k, v, mask=mask)
+                x = x + self.dropout(self.proj(attn_out))
+                h = self.ln2(x)
+                if hasattr(self, 'moe'):
+                    x = x + self.dropout(self.moe(h))
+                else:
+                    x = x + self.dropout(self.mlp(h))
                 return x
-        
-        return MoEBlock()
-
-    def _build_moe_block(self):
-        class MoEBlock(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.self_attn = nn.MultiheadAttention(config.HIDDEN, config.NUM_HEADS, batch_first=True)
-                self.moe = MoELayer(config.HIDDEN, config.FFN_DIM, config.NUM_EXPERTS, config.EXPERTS_ACTIVE)
-                self.norm1 = nn.LayerNorm(config.HIDDEN)
-                self.norm2 = nn.LayerNorm(config.HIDDEN)
-                self.dropout = nn.Dropout(0.1)
-            
-            def forward(self, x):
-                attn_out, _ = self.self_attn(x, x, x)
-                x = self.norm1(x + self.dropout(attn_out))
-                moe_out = self.moe(x)
-                x = self.norm2(x + self.dropout(moe_out))
-                return x
-        
-        return MoEBlock()
+        return UnifiedBlock()
     
     def _estimate_active_params(self):
         base = sum(p.numel() for n, p in self.named_parameters() if 'experts' not in n)
@@ -522,16 +443,40 @@ class QyuziUltimate(nn.Module):
             print(f"fresh?")
             return None
 
-    def forward(self, idx, think_steps=None, images=None):
+
+
+    def forward(self, idx, think_steps=None, images=None, audio=None, video=None):
         if think_steps is None: think_steps = config.THINK_STEPS_TRAIN
-        B, T = idx.shape
-        x = self.embed(idx) + self.pos(torch.arange(T, device=idx.device))
+        
+        if images is not None and images.numel() > 0 and self.vision_encoder is not None:
+             vision_feats = self.vision_encoder(images.float())
+             vision_emb = self.vision_proj(vision_feats)
+             img_tok = self.img_token.expand(vision_emb.shape[0], 1, -1)
+             vision_seq = torch.cat([img_tok, vision_emb], dim=1)
+             
+             text_emb = self.embed(idx)
+             x = torch.cat([vision_seq, text_emb], dim=1)
+             
+             prefix_len = vision_seq.shape[1]
+             text_len = text_emb.shape[1]
+             total_len = prefix_len + text_len
+             
+             active_mask = torch.zeros(total_len, total_len, device=idx.device)
+             active_mask[prefix_len:, prefix_len:] = self.causal_mask[:text_len, :text_len]
+             active_mask[:prefix_len, prefix_len:] = float('-inf')
+        else:
+             x = self.embed(idx)
+             T = idx.shape[1]
+             if T > config.MAX_SEQ:
+                  pass
+             active_mask = self.causal_mask[:T, :T]
+
         
         hidden_prev = None
         for step in range(think_steps):
             for block in self.blocks:
-                x = block(x)
-            
+                 x = block(x, mask=active_mask)
+                     
             if self.snn is not None:
                 snn_out = self.snn(x)
                 snn_gate = torch.sigmoid(self.lm_head(snn_out))
@@ -551,12 +496,15 @@ class QyuziUltimate(nn.Module):
             
             wm_out = self.wm(x.mean(1))
             x = x + wm_out.unsqueeze(1)
-
-            if T > 3:
+            current_T = x.shape[1]
+            if current_T > 3:
                 c = x[:, :-3].mean(1)
                 e = x[:, 3:].mean(1)
                 prob = self.causal(c, e)[:, 1]
                 x[:, 3:] += 0.15 * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
+            
+            x = self.think_norm(x)
+        return self.lm_head(self.norm(x))
         
         if self.dream is not None and self.training:
             importance = torch.rand(B, T, device=x.device)
@@ -593,15 +541,17 @@ class EndlessCrawler(threading.Thread):
                     topic = random.choice(self.topics)
                     page = wikipedia.page(wikipedia.search(topic, results=1)[0])
                     text = page.content
+                    image_urls = page.images
                 else:
                     with DDGS() as ddgs:
                         query = random.choice(self.topics) + " explained"
                         results = [r for r in ddgs.text(query, max_results=5)]
                         text = " ".join([r['body'] for r in results if r['body']])
+                        image_urls = []
 
                 if len(text) > 500:
-                    self.queue.put(text)
-                    print(f"[{datetime.now()}] Crawled {len(text):,} chars — {topic}")
+                    self.queue.put((text, image_urls))
+                    print(f"[{datetime.now()}] Crawled {len(text):,} chars + {len(image_urls)} imgs — {topic}")
                 time.sleep(random.uniform(3, 12))
             except Exception as e:
                 time.sleep(10)
@@ -614,19 +564,49 @@ class EndlessDataset(Dataset):
     def __len__(self): return 1_000_000_000_000 #Lol
 
     def __getitem__(self, idx):
+        from queue import Empty
+        tries = 0
+        text_seq = None
         while len(self.buffer) < 10:
             try:
-                text = self.queue.get(timeout=5)
+                data = self.queue.get(timeout=2)
+                if isinstance(data, tuple):
+                    text, img_urls = data
+                else:
+                    text, img_urls = data, []
+                    
                 tokens = encode("<|endoftext|>" + text)
                 if len(tokens) > 100:
-                    self.buffer.append(torch.tensor(tokens))
-            except:
+                    self.buffer.append((torch.tensor(tokens), img_urls))
+                tries = 0
+            except Empty:
+                tries += 1
+                if tries > 5:
+                    if len(self.buffer) > 0: 
+                        break
+                    else:
+                        print("Warning: Dataset queue starvation")
+                        fake_text = "Science is the study of the structure and behavior of the physical and natural world through observation and experiment. " * 10
+                        self.buffer.append(torch.tensor(encode(fake_text)))
+                        break
+            except Exception as e:
                 pass
 
-        chunk = random.choice(self.buffer)
+        chunk_data = random.choice(self.buffer)
+        if isinstance(chunk_data, tuple):
+            chunk, img_urls = chunk_data
+        else:
+            chunk, img_urls = chunk_data, []
+            
         i = random.randint(0, len(chunk)-config.MAX_SEQ-10)
         seq = chunk[i:i+config.MAX_SEQ+10]
-        return seq[:-1], seq[1:]
+        text_seq = (seq[:-1], seq[1:])
+        
+        if config.ENABLE_MULTIMODAL:
+             images = torch.randn(3, 256, 256)
+             return text_seq[0], text_seq[1], images
+        
+        return text_seq[0], text_seq[1], torch.empty(0)
 
 def endless_think_training():
     model = QyuziUltimate().to(config.DEVICE)
@@ -652,8 +632,17 @@ def endless_think_training():
     
     print(f"Booting Lol")
     print(f"Starting from step {start_step}")
-
-    for x, y in loader:
+    for batch in loader:
+        if len(batch) == 3:
+             x, y, images = batch
+             if images.numel() > 0:
+                 images = images.to(config.DEVICE)
+             else:
+                 images = None
+        else:
+             x, y = batch
+             images = None
+             
         x, y = x.to(config.DEVICE), y.to(config.DEVICE)
 
         if step < config.WARMUP_STEPS:
@@ -662,7 +651,7 @@ def endless_think_training():
                 param_group['lr'] = config.LR * lr_mult
 
         with torch.cuda.amp.autocast():
-            logits = model(x, think_steps=config.THINK_STEPS_TRAIN)
+            logits = model(x, think_steps=config.THINK_STEPS_TRAIN, images=images)
             lm_loss = F.cross_entropy(logits.view(-1, config.VOCAB_SIZE), y.view(-1), ignore_index=-100)
             
             loss = lm_loss

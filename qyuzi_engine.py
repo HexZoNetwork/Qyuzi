@@ -16,40 +16,70 @@ class ScalableMoE(nn.Module):
         self.top_k = top_k
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
-        self.router = nn.Linear(hidden_dim, num_experts)
+        self.expert_capacity_ratio = expert_capacity_ratio
+        
+        self.router = nn.Linear(hidden_dim, num_experts, bias=False)
         self.w1 = nn.Parameter(torch.randn(num_experts, hidden_dim, ffn_dim) * 0.02)
         self.w2 = nn.Parameter(torch.randn(num_experts, ffn_dim, hidden_dim) * 0.02)
+        
         self.register_buffer('expert_counts', torch.zeros(num_experts))
         self.register_buffer('total_tokens', torch.tensor(0.0))
         
     def forward(self, x):
+        if self.training:
+            self.expert_counts.zero_()
+            self.total_tokens.zero_()
+
         B, T, H = x.shape
         x_flat = x.view(-1, H)
+        num_tokens = x_flat.size(0)
+
         router_logits = self.router(x_flat)
-        routing_weights = F.softmax(router_logits, dim=-1)
-        top_k_weights, top_k_indices = torch.topk(routing_weights, self.top_k, dim=-1)
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        router_probs = F.softmax(router_logits, dim=-1)
+        k_probs, k_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        k_probs = k_probs / k_probs.sum(dim=-1, keepdim=True)
+
+        if self.training:
+            with torch.no_grad():
+                batch_counts = torch.bincount(k_indices.view(-1), minlength=self.num_experts)
+                self.expert_counts += batch_counts.float()
+                self.total_tokens += num_tokens
+
+        capacity = int(self.expert_capacity_ratio * num_tokens * self.top_k / self.num_experts)
+        capacity = max(4, capacity)
+        indices_flat = k_indices.view(-1)
+        sorted_indices, sort_map = torch.sort(indices_flat)
+        counts = torch.bincount(sorted_indices, minlength=self.num_experts)
+        counts_clamped = torch.clamp(counts, max=capacity)
+
         output = torch.zeros_like(x_flat)
-        for k in range(self.top_k):
-            expert_idx = top_k_indices[:, k]
-            expert_mask = F.one_hot(expert_idx, num_classes=self.num_experts).float()
-            for e in range(self.num_experts):
-                mask = expert_mask[:, e].unsqueeze(-1)
-                if mask.sum() > 0:
-                    expert_in = x_flat * mask
-                    hidden = F.gelu(expert_in @ self.w1[e])
-                    expert_out = hidden @ self.w2[e]
-                    weight = top_k_weights[:, k].unsqueeze(-1) * mask
-                    output += expert_out * weight
-                    self.expert_counts[e] += mask.sum()
-        self.total_tokens += B * T
-        return output.view(B, T, H)
+        start = 0
+
+        for e in range(self.num_experts):
+            count = counts[e].item()
+            if count == 0:
+                continue
+            clamped = counts_clamped[e].item()
+
+            tokens = x_flat[sort_map[start:start + count]]
+            expert_out = F.silu(tokens @ self.w1[e]) @ self.w2[e]
+
+            if count > clamped:
+                expert_out = expert_out[:clamped]
+
+            positions = sort_map[start:start + clamped]
+            output[positions] += expert_out
+            start += count
+        weighted = output.view(num_tokens, self.top_k, H) * k_probs.unsqueeze(-1)
+        final = weighted.sum(dim=1)
+
+        return final.view(B, T, H) + x
     
     def load_balancing_loss(self):
         if self.total_tokens > 0:
-            avg_usage = self.expert_counts / self.total_tokens
+            avg_usage = self.expert_counts / (self.total_tokens + 1e-6)
             target = 1.0 / self.num_experts
-            return F.mse_loss(avg_usage, torch.full_like(avg_usage, target))
+            return self.num_experts * torch.sum((avg_usage - target)**2)
         return torch.tensor(0.0)
 
 class Context32KScaling(nn.Module):
@@ -78,15 +108,32 @@ class Context32KScaling(nn.Module):
     
     def forward(self, q, k, v, mask=None):
         B, T, H = q.shape
+        nh = self.num_heads
+        hd = self.head_dim
+        q = q.view(B, T, nh, hd)
+        k = k.view(B, T, nh, hd)
+        v = v.view(B, T, nh, hd)
+        
         cos, sin = self.rotary(q, seq_len=T)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        alibi_bias = self.get_alibi_bias(T)
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(hd)
+        
+        alibi_bias = self.get_alibi_bias(T).to(q.device)
         scores = scores + alibi_bias.unsqueeze(0)
+        
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+             if mask.dim() == 2:
+                 mask = mask.unsqueeze(0).unsqueeze(0)
+             scores = scores.masked_fill(mask == 0, float('-inf'))
+             
         attn = F.softmax(scores, dim=-1)
-        return torch.matmul(attn, v)
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(B, T, H)
+        return out
 
 class RotaryPositionEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len=32768, base=10000.0):
@@ -245,7 +292,7 @@ class DreamConsolidationEngine(nn.Module):
         if importance is None:
             importance = torch.ones(states_flat.size(0), device=states_flat.device)
         else:
-            importance = importance.view(-1)
+            importance = importance.view(-1).clamp(0.0, 5.0)
         for i in range(min(states_flat.size(0), self.memory_size)):
             idx = self.write_ptr % self.memory_size
             self.episodic_memory[idx] = states_flat[i]
@@ -466,7 +513,7 @@ class RecursiveSelfImprovement(nn.Module):
             current_state = current_state.unsqueeze(1)
         meta_output, _ = self.meta_learner(current_state)
         performance = self.evaluator(meta_output)
-        improvements = self.mutation_generator(meta_output)
+        improvements = torch.tanh(self.mutation_generator(meta_output)) * 0.1
         return {
             'improvements': improvements,
             'performance': performance,

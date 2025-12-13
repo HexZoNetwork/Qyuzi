@@ -1,6 +1,31 @@
 import argparse
 import os
 import sys
+from PIL import Image
+try:
+    import torchvision.transforms as T
+except ImportError:
+    T = None
+
+from qyuzi import tokenizer, encode, decode, config, QyuziUltimate
+import torch
+import torch.nn.functional as F
+
+def load_image(path):
+    if T is None:
+        print("torchvision not found")
+        return None
+    try:
+        img = Image.open(path).convert('RGB')
+        transform = T.Compose([
+            T.Resize((256, 256)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        return transform(img).unsqueeze(0).to(config.DEVICE)
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None
 
 def main():
     parser = argparse.ArgumentParser(description='Qyuzi System')
@@ -21,6 +46,8 @@ def main():
                        help='Enable multi-modal')
     parser.add_argument('--autonomy', action='store_true',
                        help='Enable autonomous features')
+    parser.add_argument('--image', type=str, default=None,
+                       help='Path to image for multimodal input')
     
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'generate', 'eval', 'swarm'],
@@ -105,7 +132,8 @@ def main():
             prompt=args.prompt,
             max_new=args.tokens,
             think_steps=args.steps,  
-            temperature=args.temp
+            temperature=args.temp,
+            image_path=args.image
         )
         print("\n" + "="*70)
         print("RESULT:")
@@ -136,7 +164,7 @@ def main():
     
     elif args.mode == 'eval':
         print("📊 Running evaluation suite...\n")
-        from qyuzi import QyuziUltimate
+        from qyuzi import QyuziUltimate, config
         import torch
         
         model = QyuziUltimate().to(config.DEVICE)
@@ -155,6 +183,25 @@ def main():
             result = generate(prompt, max_new=100, think_steps=8)
             print(f"[{category}] {prompt[:30]}...")
             print(f"→ {result[:100]}...\n")
+
+@torch.inference_mode()
+def generate(prompt: str, max_new=200, think_steps=8, temperature=0.8, image_path=None):
+    model = QyuziUltimate().to(config.DEVICE)
+    model.eval()
+    model.load_checkpoint()
+    
+    ids = torch.tensor([encode(prompt)]).to(config.DEVICE)
+    
+    images = None
+    if image_path:
+        images = load_image(image_path)
+        print(f"Loaded image: {image_path}")
+
+    for _ in range(max_new):
+        logits = model(ids, think_steps=think_steps, images=images)
+        next_id = torch.multinomial(F.softmax(logits[:,-1]/temperature, -1), 1)
+        ids = torch.cat([ids, next_id], -1)
+    return decode(ids[0].tolist())
 
 if __name__ == "__main__":
     main()
