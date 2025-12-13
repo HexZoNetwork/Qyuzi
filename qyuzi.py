@@ -18,6 +18,15 @@ import hashlib
 from typing import Optional, Tuple, List
 from collections import deque
 import numpy as np
+from qyuzi_engine import (
+    ScalableMoE, Context32KScaling, RotaryPositionEmbedding as RoPE_Engine,
+    AdvancedSpikingNeuralNetwork, VectorSymbolicArchitecture,
+    DreamConsolidationEngine, SelfModelingModule,
+    ScalableVisionEncoder, MultiModalReasoningFusion,
+    RecursiveSelfImprovement, apply_rotary_pos_emb as apply_rope_engine,
+    RecurrentGate
+)
+
 try:
     from flash_attn import flash_attn_func
     HAS_FLASH_ATTN = True
@@ -121,6 +130,8 @@ class Config:
     ENABLE_VSA = os.getenv("QYUZI_VSA", "0") == "1"
     ENABLE_DREAM = os.getenv("QYUZI_DREAM", "0") == "1"
     ENABLE_SELFMODEL = os.getenv("QYUZI_SELFMODEL", "0") == "1"
+    ENABLE_MULTIMODAL = os.getenv("QYUZI_MULTIMODAL", "0") == "1"
+    ENABLE_AUTONOMY = os.getenv("QYUZI_AUTONOMY", "0") == "1"
 
 config = Config()
 
@@ -348,8 +359,9 @@ class QyuziUltimate(nn.Module):
         self.pos = nn.Embedding(config.MAX_SEQ, config.HIDDEN)
         
         if config.USE_MOE:
+            print(f"⚡ ScalableMoE: {config.NUM_EXPERTS} experts, top-{config.EXPERTS_ACTIVE}")
             self.blocks = nn.ModuleList([
-                self._build_moe_block() for _ in range(config.NUM_LAYERS)
+                self._build_scalable_moe_block() for _ in range(config.NUM_LAYERS)
             ])
             self.moe_layers = [block.moe for block in self.blocks if hasattr(block, 'moe')]
         else:
@@ -369,15 +381,76 @@ class QyuziUltimate(nn.Module):
 
         self.wm = ConsciousWorkingMemory(config.HIDDEN)
         self.causal = CausalEngine(config.HIDDEN)
+        
+        self.context32k = Context32KScaling(config.HIDDEN, config.NUM_HEADS, max_seq_len=config.MAX_SEQ)
+        
+        if config.ENABLE_SNN:
+            self.snn = AdvancedSpikingNeuralNetwork(config.HIDDEN, config.HIDDEN, num_layers=3)
+            print("✅ SNN co-processor")
+        else:
+            self.snn = None
+        
+        if config.ENABLE_VSA:
+            self.vsa = VectorSymbolicArchitecture(dim=10000, seed_dim=config.HIDDEN, num_symbols=1000)
+            print("✅ VSA 10K hypervectors")
+        else:
+            self.vsa = None
+        
+        if config.ENABLE_DREAM:
+            self.dream = DreamConsolidationEngine(config.HIDDEN, memory_size=50000, num_dream_cycles=10)
+            print("✅ Dream 50K memory")
+        else:
+            self.dream = None
+        
+        if config.ENABLE_SELFMODEL:
+            self.self_model = SelfModelingModule(config.HIDDEN, num_capabilities=10)
+            print("✅ Self-modeling")
+        else:
+            self.self_model = None
+        
+        if config.ENABLE_MULTIMODAL:
+            self.vision_encoder = ScalableVisionEncoder(config.HIDDEN, max_image_size=1024)
+            self.multimodal_fusion = MultiModalReasoningFusion(config.HIDDEN, num_modalities=4)
+            print("✅ Multi-modal Vision+Fusion")
+        else:
+            self.vision_encoder = None
+            self.multimodal_fusion = None
+        
+        if config.ENABLE_AUTONOMY:
+            self.self_improvement = RecursiveSelfImprovement(config.HIDDEN, num_iterations=5)
+            print("✅ Self-improvement")
+        else:
+            self.self_improvement = None
+        
+        self.recurrent_gate = RecurrentGate(config.HIDDEN)
 
         total_params = sum(p.numel() for p in self.parameters())
         active_params = self._estimate_active_params() if config.USE_MOE else total_params
         
-        print(f"🚀 QYUZI ({config.VERSION}) ready")
-        print(f"   Total params: {total_params:,} ({total_params/1e6:.1f}M)")
+        print(f"\n🚀 QYUZI ULTIMATE ({config.VERSION})")
+        print(f"   Total: {total_params:,} ({total_params/1e6:.1f}M)")
         if config.USE_MOE:
-            print(f"   Active params: {active_params:,} ({active_params/1e6:.1f}M)")
-            print(f"   MoE: {config.NUM_EXPERTS}, top-{config.EXPERTS_ACTIVE} routing")
+            print(f"   Active: {active_params:,} ({active_params/1e6:.1f}M)")
+        print(f"   Context: {config.MAX_SEQ} tokens\n")
+    
+    def _build_scalable_moe_block(self):
+        class MoEBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.self_attn = nn.MultiheadAttention(config.HIDDEN, config.NUM_HEADS, batch_first=True)
+                self.moe = ScalableMoE(config.HIDDEN, config.FFN_DIM, config.NUM_EXPERTS, config.EXPERTS_ACTIVE)
+                self.norm1 = nn.LayerNorm(config.HIDDEN)
+                self.norm2 = nn.LayerNorm(config.HIDDEN)
+                self.dropout = nn.Dropout(0.1)
+            
+            def forward(self, x):
+                attn_out, _ = self.self_attn(x, x, x)
+                x = self.norm1(x + self.dropout(attn_out))
+                moe_out = self.moe(x)
+                x = self.norm2(x + self.dropout(moe_out))
+                return x
+        
+        return MoEBlock()
 
     def _build_moe_block(self):
         class MoEBlock(nn.Module):
@@ -449,14 +522,33 @@ class QyuziUltimate(nn.Module):
             print(f"fresh?")
             return None
 
-    def forward(self, idx, think_steps=None):
+    def forward(self, idx, think_steps=None, images=None):
         if think_steps is None: think_steps = config.THINK_STEPS_TRAIN
         B, T = idx.shape
         x = self.embed(idx) + self.pos(torch.arange(T, device=idx.device))
-
+        
+        hidden_prev = None
         for step in range(think_steps):
             for block in self.blocks:
                 x = block(x)
+            
+            if self.snn is not None:
+                snn_out = self.snn(x)
+                snn_gate = torch.sigmoid(self.lm_head(snn_out))
+                x = x * (1 + 0.1 * snn_gate * snn_out.mean(dim=-1, keepdim=True))
+            
+            if self.vsa is not None:
+                if step == 0:
+                    self.vsa_context = torch.zeros_like(x.mean(dim=1))
+                
+                vsa_curr = x.mean(dim=1)
+                self.vsa_context = self.vsa(self.vsa_context, vsa_curr, operation='bundle')
+                x = x + 0.05 * self.vsa_context.unsqueeze(1)
+            
+            x_recurrent = self.recurrent_gate(x.mean(dim=1), hidden_prev)
+            hidden_prev = x_recurrent
+            x = x + x_recurrent.unsqueeze(1) * 0.1
+            
             wm_out = self.wm(x.mean(1))
             x = x + wm_out.unsqueeze(1)
 
@@ -464,7 +556,20 @@ class QyuziUltimate(nn.Module):
                 c = x[:, :-3].mean(1)
                 e = x[:, 3:].mean(1)
                 prob = self.causal(c, e)[:, 1]
-                x[:, 3:] += 0.08 * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
+                x[:, 3:] += 0.15 * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
+        
+        if self.dream is not None and self.training:
+            importance = torch.rand(B, T, device=x.device)
+            self.dream.store_experience(x.detach(), importance)
+        
+        if self.self_model is not None:
+            meta = self.self_model(x.mean(dim=1))
+            x = x * (1 + 0.05 * torch.sigmoid(meta.unsqueeze(1)))
+        
+        if self.self_improvement is not None:
+            improvement_data = self.self_improvement(x.mean(dim=1))
+            delta = improvement_data['improvements'].unsqueeze(1)
+            x = x + 0.1 * delta
 
         return self.lm_head(self.norm(x))
     
@@ -560,11 +665,15 @@ def endless_think_training():
             logits = model(x, think_steps=config.THINK_STEPS_TRAIN)
             lm_loss = F.cross_entropy(logits.view(-1, config.VOCAB_SIZE), y.view(-1), ignore_index=-100)
             
+            loss = lm_loss
+            
             if config.USE_MOE:
                 moe_loss = model.get_moe_loss()
-                loss = lm_loss + 0.01 * moe_loss
-            else:
-                loss = lm_loss
+                loss = loss + 0.01 * moe_loss
+            
+            if config.ENABLE_DREAM and step % 10 == 0:
+                dream_loss = model.dream.consolidate()
+                loss = loss + 0.001 * dream_loss
 
         scaler.scale(loss / config.GRAD_ACCUM).backward()
 

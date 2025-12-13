@@ -6,7 +6,7 @@ def main():
     parser = argparse.ArgumentParser(description='Qyuzi System')
     
     parser.add_argument('--stage', type=str, default='fh',
-                       choices=['f', 'fh', 'sec', 'fih'],
+                       choices=['f', 'sc', 'th', 'fh', 'fih'],
                        help='Select model stage')
     
     parser.add_argument('--snn', action='store_true',
@@ -19,8 +19,8 @@ def main():
                        help='Enable Self-Modeling module')
     parser.add_argument('--multimodal', action='store_true',
                        help='Enable multi-modal')
-    parser.add_argument('--swarm', action='store_true',
-                       help='Enable swarm deployment mode')
+    parser.add_argument('--autonomy', action='store_true',
+                       help='Enable autonomous features')
     
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'generate', 'eval', 'swarm'],
@@ -51,6 +51,10 @@ def main():
         os.environ['QYUZI_DREAM'] = '1'
     if args.selfmodel:
         os.environ['QYUZI_SELFMODEL'] = '1'
+    if args.multimodal:
+        os.environ['QYUZI_MULTIMODAL'] = '1'
+    if args.autonomy:
+        os.environ['QYUZI_AUTONOMY'] = '1'
     
     from qyuzi import config, endless_think_training, generate
     
@@ -80,6 +84,8 @@ def main():
         features.append("SelfModel")
     if args.multimodal:
         features.append("MultiModal")
+    if args.autonomy:
+        features.append("Autonomy")
     if features:
         print(f"Advanced: {', '.join(features)}")
     print("="*70)
@@ -96,10 +102,10 @@ def main():
         
         print(f"Using Brain...\n")
         result = generate(
-            args.prompt,
-            max_new=args.max_new,
-            think_steps=args.think_steps,
-            temperature=args.temperature
+            prompt=args.prompt,
+            max_new=args.tokens,
+            think_steps=args.steps,  
+            temperature=args.temp
         )
         print("\n" + "="*70)
         print("RESULT:")
@@ -109,9 +115,9 @@ def main():
     
     elif args.mode == 'swarm':
         import asyncio
-        from qyuzi_swarm import QuantumSwarm, SwarmTopology
+        from qyuzi_engine import QuantumSwarm, SwarmTopology
         
-        print(f"Swarm node f{args.num_nodes}\n")
+        print(f"Swarm node f{args.nodes}\n")
         
         topology_map = {
             'hierarchical': SwarmTopology.HIERARCHICAL,
@@ -120,8 +126,7 @@ def main():
             'star': SwarmTopology.STAR
         }
         
-        swarm = QuantumSwarm(num_nodes=args.num_nodes)
-        swarm.coordinator.topology = topology_map[args.topology]
+        swarm = QuantumSwarm(num_nodes=args.nodes, topology=topology_map[args.topology])
         
         async def run_swarm():
             await swarm.deploy()
