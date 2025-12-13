@@ -1,4 +1,4 @@
-# 🏎️ Qyuzi — Next-Generation AGI System
+# 🏎️ Qyuzi — Ferrari Lol
 
 <div align="center">
 
@@ -327,5 +327,6 @@ For questions, collaborations, or just to chat about AGI:
 **Qyuzi never sleeps. 🏎️💨**
 
 *Built with 🧠 and ⚡ by A Single Person [just a kid]*
+
 
 </div>
