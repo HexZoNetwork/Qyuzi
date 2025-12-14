@@ -44,39 +44,39 @@ class ScalableMoE(nn.Module):
                 self.expert_counts += batch_counts.float()
                 self.total_tokens += num_tokens
             self.expert_prob_sum += router_probs.sum(0)
-        capacity = int(self.expert_capacity_ratio * num_tokens * self.top_k / self.num_experts)
-        capacity = max(4, capacity)
+        
+        capacity = int(self.expert_capacity_ratio * num_tokens * self.top_k / self.num_experts) + 1
         
         indices_flat = k_indices.view(-1)
         sorted_indices, sort_map = torch.sort(indices_flat)
+        
         counts = torch.bincount(sorted_indices, minlength=self.num_experts)
-        counts_clamped = torch.clamp(counts, max=capacity)
         
         output = torch.zeros_like(x_flat)
-        start = 0
+        
+        start_indices = torch.cat([torch.tensor([0], device=x.device), torch.cumsum(counts, dim=0)[:-1]])
+        
         for e in range(self.num_experts):
             count = counts[e].item()
             if count == 0:
                 continue
-            clamped = counts_clamped[e].item()
-            
-            if count > clamped:
-                keep = torch.randperm(count, device=x.device)[:clamped]
                 
-                tokens = x_flat[sort_map[start:start + count][keep]]
-                positions = sort_map[start:start + count][keep]
-            else:
-                tokens = x_flat[sort_map[start:start + count]]
-                positions = sort_map[start:start + clamped]
-
+            start = start_indices[e].item()
+            end = start + count
+            
+            expert_token_indices = sort_map[start:end]
+            
+            if count > capacity:
+                 perm = torch.randperm(count, device=x.device)[:capacity]
+                 expert_token_indices = expert_token_indices[perm]
+                 
+            tokens = x_flat[expert_token_indices]
+            
             h = F.silu(tokens @ self.w1[e]) 
             expert_out = h @ self.w2[e]
             
-            # Index add safe
-            output.index_add_(0, positions, expert_out)
+            output.index_add_(0, expert_token_indices, expert_out)
 
-            start += count
-            
         weighted = output.view(num_tokens, self.top_k, H) * k_probs.unsqueeze(-1)
         final = weighted.sum(dim=1)
 

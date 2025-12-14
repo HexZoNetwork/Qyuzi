@@ -1,9 +1,11 @@
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 import time
 from datetime import datetime
 from queue import Queue
@@ -14,27 +16,19 @@ from qyuzi.model.transformer import QyuziUltimate
 from qyuzi.data.crawler import EndlessCrawler
 from qyuzi.data.dataset import EndlessDataset
 from torch.utils.data import DataLoader, IterableDataset
-class HybridDataset(IterableDataset):
-    def __init__(self, queue, hf_dataset=None):
-        self.queue = queue
-        self.hf_iter = iter(hf_dataset) if hf_dataset else None
-        
-    def __iter__(self):
-        while True:
-            if self.hf_iter and torch.rand(1).item() > 0.5:
-                try:
-                    item = next(self.hf_iter)
-                    pass
-                except StopIteration:
-                    pass
-            
-            if not self.queue.empty():
-                 yield self.queue.get()
 
-def train():
+
+
+def train(*args, **kwargs):
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        config.DEVICE = f"cuda:{local_rank}"
+    
     seed_everything(42)
     logger = setup_logging()
-    model = QyuziUltimate().to(config.DEVICE)
+    model = QyuziUltimate(**kwargs).to(config.DEVICE)
     if hasattr(torch, 'compile'):
         print("Compiling model...")
         model = torch.compile(model)
@@ -71,8 +65,12 @@ def train():
         try:
             from datasets import load_dataset
             hf_dataset = load_dataset(config.DATASET_NAME, split='train', streaming=True)
+        except ImportError:
+             logger.warning("HuggingFace 'datasets' library not found. Falling back to Crawler/Synthetic only.")
+             hf_dataset = None
         except Exception as e:
-            logger.error(f"Failed to load HF dataset: {e}")
+            logger.error(f"Failed to load HF dataset: {e}. Falling back to Crawler/Synthetic only.")
+            hf_dataset = None
 
     dataset = EndlessDataset(queue) 
     
@@ -93,14 +91,19 @@ def train():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = config.LR * lr_mult
         else:
-            # Cosine decay
             progress = (step - config.WARMUP_STEPS) / 1000000
             cosine_lr = config.LR * 0.5 * (1 + torch.cos(torch.tensor(progress * 3.14159)))
             for param_group in optimizer.param_groups:
                  param_group['lr'] = max(cosine_lr, config.LR * 0.1)
 
         with torch.cuda.amp.autocast():
-            logits = model(x, think_steps=config.THINK_STEPS_TRAIN, images=images)
+            output = model(x, think_steps=config.THINK_STEPS_TRAIN, images=images)
+            msg = "Model output must be a tuple or tensor"
+            if isinstance(output, tuple):
+                logits = output[0]
+            else:
+                logits = output
+            
             loss = F.cross_entropy(logits.view(-1, config.VOCAB_SIZE), y.view(-1), ignore_index=-100)
             if config.USE_MOE:
                 moe_loss = model.get_moe_loss()

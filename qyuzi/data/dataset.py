@@ -2,16 +2,8 @@ import torch
 from torch.utils.data import Dataset
 from queue import Queue, Empty
 import random
-import tiktoken
-from ..config import config
-
-tokenizer = tiktoken.get_encoding("cl100k_base")
-
-def encode(text): 
-    return tokenizer.encode(text, allowed_special={'<|endoftext|>'})
-
-def decode(ids): 
-    return tokenizer.decode(ids)
+from .tokenizer import encode, decode
+from qyuzi.config import config
 
 class EndlessDataset(Dataset):
     def __init__(self, queue: Queue):
@@ -40,11 +32,12 @@ class EndlessDataset(Dataset):
                 if tries > 5:
                     if len(self.buffer) > 0:
                         break
-                    fallback = "Science is the systematic study of the structure and behavior of the physical and natural world. " * 5
-                    self.buffer.append((torch.tensor(encode(fallback)), []))
+                    fallback_tokens = [0] * (config.MAX_SEQ + 1)
+                    self.buffer.append((torch.tensor(fallback_tokens, dtype=torch.long), []))
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Dataset Internal Error: {e}")
+                tries += 1
         chunk_data = random.choice(self.buffer)
         chunk, img_urls = chunk_data
         if len(chunk) <= config.MAX_SEQ + 1:
