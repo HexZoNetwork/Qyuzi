@@ -54,15 +54,24 @@ class StageConfig:
 class Config:
     ACTIVE_STAGE = os.getenv("QYUZI_STAGE", "f")
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if ACTIVE_STAGE not in StageConfig.STAGES:
+        raise ValueError(f"Stage {ACTIVE_STAGE} not valid. Choose: {list(StageConfig.STAGES.keys())}")
+    
     stage_cfg = StageConfig.STAGES[ACTIVE_STAGE]
     VERSION = ACTIVE_STAGE
     try:
         import tiktoken
         tokenizer = tiktoken.get_encoding("cl100k_base")
         VOCAB_SIZE = tokenizer.n_vocab
+        EOT_TOKEN = getattr(tokenizer, 'eot_token', 100257) 
+        PAD_TOKEN = 100258
     except ImportError:
-        VOCAB_SIZE = 100352
-        
+        VOCAB_SIZE = 258 
+        EOT_TOKEN = 256
+        PAD_TOKEN = 257
+    CRAWLER_TOPICS = ["science", "history", "philosophy", "technology", "mathematics", "biology", "physics", "ai", "quantum mechanics", "neuroscience", "space exploration"]
+    USE_SYNTHETIC_FALLBACK = True
+
     HIDDEN = stage_cfg["hidden"]
     NUM_LAYERS = stage_cfg["layers"]
     NUM_HEADS = stage_cfg["heads"]
@@ -105,6 +114,15 @@ class Config:
     WM_SCALE = 1.0
     CAUSAL_BRANCH_SCALE = 0.15
     INIT_STD = 0.02
+    TOTAL_STEPS = 1000000
     DROPOUT_RATE = 0.1
+    COGNITIVE_MEMORY_SLOTS = 7
+    COGNITIVE_SLEEP_CYCLES = 4
+    SELF_MODEL_DEPTH = 3
+    CURIOSITY_THRESHOLD = 0.6
+    ENABLE_SELF_MODIFICATION = True
+    MAX_MODIFICATION_RATE = 0.01
+    ENABLE_COUNTERFACTUALS = True
+    ENABLE_EXISTENTIAL_SAFETY = True
 
 config = Config()
