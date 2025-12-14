@@ -2,7 +2,6 @@ import sys
 import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
-
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -17,10 +16,7 @@ from qyuzi.data.crawler import CognitiveCrawler
 from qyuzi.data.dataset import EndlessDataset
 from torch.utils.data import DataLoader, IterableDataset
 
-
-
 def train(*args, **kwargs):
-    # Device setup
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         dist.init_process_group(backend="nccl")
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -34,8 +30,6 @@ def train(*args, **kwargs):
     
     seed_everything(42)
     logger = setup_logging()
-    
-    # Model setup
     logger.info(f"Using device: {config.DEVICE}")
     model = QyuziUltimate(**kwargs).to(config.DEVICE)
     if hasattr(torch, 'compile') and config.DEVICE.startswith("cuda"):
@@ -43,8 +37,6 @@ def train(*args, **kwargs):
         model = torch.compile(model)
         
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.LR, weight_decay=config.WEIGHT_DECAY)
-    
-    # Mixed Precision Checks
     use_amp = config.DEVICE.startswith("cuda")
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
     
@@ -86,12 +78,9 @@ def train(*args, **kwargs):
                     text = item.get('text', '')
                     if text: yield text
             hf_dataset = hf_data_generator()
-            
-            # Critical Fix: Feed HF data into the queue via thread
             def hf_feeder():
                 for text in hf_dataset:
                     queue.put((text, []))
-                    # Prevent queue overflow
                     while queue.qsize() > 4000:
                         time.sleep(0.1)
             executor.submit(hf_feeder)
@@ -127,9 +116,6 @@ def train(*args, **kwargs):
                  param_group['lr'] = max(cosine_lr, config.LR * 0.1)
 
         device_type = 'cuda' if config.DEVICE.startswith("cuda") else 'cpu'
-        
-        # CPU autocast is often slow or requires bfloat16, disabling for simplicity/stability if CPU
-        # Or you can use: torch.amp.autocast(device_type=device_type, enabled=use_amp)
         with torch.amp.autocast(device_type=device_type, enabled=use_amp):
             output = model(x, think_steps=config.THINK_STEPS_TRAIN, images=images)
             msg = "Model output must be a tuple or tensor"

@@ -87,8 +87,6 @@ class QyuziUltimate(nn.Module):
         self.norm = RMSNorm(config.HIDDEN)
         self.lm_head = nn.Linear(config.HIDDEN, config.VOCAB_SIZE, bias=False)
         self.lm_head.weight = self.embed.weight
-        
-        # New Cognitive Architecture Components
         self.unified_layer = UnifiedCognitiveLayer(config.HIDDEN)
         self.thinking_engine = CognitiveThinkingEngine(config.HIDDEN, num_slots=config.COGNITIVE_MEMORY_SLOTS)
         self.sleep_engine = NeurophysiologicalSleepEngine(config.HIDDEN) if config.ENABLE_DREAM else None
@@ -136,10 +134,7 @@ class QyuziUltimate(nn.Module):
         if past_key_values is not None:
              past_len = past_key_values[0][0].shape[1]
              total_len = past_len + T
-             # Ensure we don't exceed causal_mask bounds
              if total_len > self.causal_mask.shape[0]:
-                 # Grow mask if needed or just clamp (assuming RoPE handles dynamic position)
-                 # Re-generate larger mask on fly if needed
                  large_mask = torch.triu(torch.ones(total_len, total_len, device=x.device) * float('-inf'), diagonal=1)
                  active_mask = large_mask[past_len:total_len, :total_len]
              else:
@@ -149,8 +144,6 @@ class QyuziUltimate(nn.Module):
 
         if active_mask.shape[0] != T:
              active_mask = torch.triu(torch.ones(T, T + (past_len if past_key_values else 0), device=x.device) * float('-inf'), diagonal=1)
-
-        # Standard Transformer Blocks
         new_past_key_values = []
         for i, block in enumerate(self.blocks):
             block_past = past_key_values[i] if past_key_values else None
@@ -159,29 +152,17 @@ class QyuziUltimate(nn.Module):
             else:
                  x, kv = block(x, mask=active_mask, past_key_value=block_past)
             new_past_key_values.append(kv)
-
-        # Cognitive Process: Unified Layer
         x = self.unified_layer(x)
-
-        # Cognitive Process: Thinking Engine (System 2)
         if think_steps > 0:
             x = self.thinking_engine.think(x, max_steps=think_steps)
-
-        # Cognitive Process: Self-Modeling
         if self.self_model:
             confidence, analysis = self.self_model(x)
-            # Modulate based on confidence (Self-Calibration)
             x = x * confidence.unsqueeze(-1).unsqueeze(-1)
-
-        # Experience Storage (for Sleep Engine)
         if self.sleep_engine and self.training:
             self.sleep_engine.store_experience(x)
-            
-        # Phase 4: Existential Safety Check
         if self.safety is not None:
              is_safe, msg = self.safety.check(x)
              if not is_safe:
-                  # Emergency dampening
                   x = x * 0.1
                   print(f"SAFETY INTERVENTION: {msg}")
 
@@ -206,11 +187,9 @@ class QyuziUltimate(nn.Module):
         if path is None: path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
         if os.path.exists(path):
             try:
-                # Security: Attempt to use weights_only=True (PyTorch 2.4+) to prevent RCE
                 checkpoint = torch.load(path, map_location=config.DEVICE, weights_only=True)
             except TypeError:
-                # Fallback for older PyTorch versions (Risk accepted due to env limitations)
-                print("Warning: Loading checkpoint without weights_only=True (Update PyTorch for security)")
+                print("Loading Checkpoint no security")
                 checkpoint = torch.load(path, map_location=config.DEVICE)
             except Exception as e:
                 print(f"Error loading checkpoint: {e}")

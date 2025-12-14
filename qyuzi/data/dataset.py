@@ -14,7 +14,6 @@ class EndlessDataset(Dataset):
         return 1_000_000_000 
 
     def __getitem__(self, idx):
-        # Prioritize fresh data
         if self.queue.qsize() > 0:
             try:
                 data = self.queue.get_nowait()
@@ -30,7 +29,6 @@ class EndlessDataset(Dataset):
                 pass
         
         while len(self.buffer) < 10:
-             # Fallback synthetic logic if buffer empty
              pad_token = getattr(config, 'PAD_TOKEN', 0)
              seq_len = config.MAX_SEQ
              x = torch.randint(0, config.VOCAB_SIZE, (seq_len,))

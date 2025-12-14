@@ -1,16 +1,11 @@
 import os
 import sys
-
-# Pre-configuration overrides
 os.environ["QYUZI_STAGE"] = "f" 
-os.environ["QYUZI_DATASET"] = "wikitext"  # Dataset kecil dari HuggingFace
-os.environ["QYUZI_REAL_DATA"] = "1"  # ⬅️ NYALAKAN real data!
+os.environ["QYUZI_DATASET"] = "wikitext"
+os.environ["QYUZI_REAL_DATA"] = "1"
 os.environ["WANDB_MODE"] = "disabled"
-
 from qyuzi.config import config
 from qyuzi.data import tokenizer
-
-# Override konfigurasi untuk testing
 class TestConfig(config.__class__):
     HIDDEN = 16 
     NUM_LAYERS = 2
@@ -23,8 +18,6 @@ class TestConfig(config.__class__):
     GRAD_ACCUM = 1
     LR = 1e-3
     USE_MOE = False
-    
-# Apply Test Config
 config.__class__ = TestConfig
 config.ENABLE_SNN = False
 config.ENABLE_VSA = False
@@ -33,14 +26,10 @@ config.ENABLE_SELFMODEL = False
 config.ENABLE_MULTIMODAL = False
 config.USE_RECURRENT_THINKING = False
 config.THINK_STEPS_TRAIN = 1
-config.ENABLE_CHECKPOINTING = True  # Matikan checkpointing dulu
+config.ENABLE_CHECKPOINTING = True
 config.SAVE_INTERVAL = 10000
-config.USE_REAL_DATASETS = True  # ⬅️ Pastikan ini True
-
-# Fix tokenizer untuk testing
+config.USE_REAL_DATASETS = True
 tokenizer.HAS_TIKTOKEN = False
-
-# Import setelah konfigurasi
 from train import train
 
 if __name__ == "__main__":

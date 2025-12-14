@@ -63,9 +63,8 @@ class Config:
         import tiktoken
         tokenizer = tiktoken.get_encoding("cl100k_base")
         VOCAB_SIZE = tokenizer.n_vocab
-        # enc.eot_token is not always available dependent on version, usually 100257
         EOT_TOKEN = getattr(tokenizer, 'eot_token', 100257) 
-        PAD_TOKEN = 100258 # Synthetic ID for pad if using tiktoken
+        PAD_TOKEN = 100258
     except ImportError:
         VOCAB_SIZE = 258 
         EOT_TOKEN = 256
@@ -117,14 +116,10 @@ class Config:
     INIT_STD = 0.02
     TOTAL_STEPS = 1000000
     DROPOUT_RATE = 0.1
-    
-    # Cognitive Architecture Config
     COGNITIVE_MEMORY_SLOTS = 7
     COGNITIVE_SLEEP_CYCLES = 4
     SELF_MODEL_DEPTH = 3
     CURIOSITY_THRESHOLD = 0.6
-    
-    # Advanced Phases (3 & 4)
     ENABLE_SELF_MODIFICATION = True
     MAX_MODIFICATION_RATE = 0.01
     ENABLE_COUNTERFACTUALS = True

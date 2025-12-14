@@ -77,7 +77,6 @@ class Context32KScaling(nn.Module):
         return get_slopes(num_heads)
     
     def get_alibi_bias(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        # Custom implementation for correct shape (num_heads, seq_len, seq_len)
         context_position = torch.arange(seq_len, device=device)[None, :, None]
         memory_position = torch.arange(seq_len, device=device)[None, None, :]
         relative_position = memory_position - context_position

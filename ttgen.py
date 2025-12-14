@@ -4,9 +4,8 @@ import sys
 import torch
 import torch.nn.functional as F
 os.environ["QYUZI_STAGE"] = "f" 
-os.environ["QYUZI_DATASET"] = "synthetic"
+os.environ["QYUZI_DATASET"] = "0"
 os.environ["QYUZI_REAL_DATA"] = "0"
-
 from qyuzi.config import config
 from qyuzi.data import tokenizer
 from qyuzi.model.transformer import QyuziUltimate
@@ -20,8 +19,6 @@ class TestConfig(config.__class__):
     USE_MOE = True
     NUM_EXPERTS = 4
     EXPERTS_ACTIVE = 1
-    
-# Apply Test Config
 original_config_class = config.__class__
 config.__class__ = TestConfig
 config.ENABLE_SNN = False
@@ -37,18 +34,15 @@ tokenizer.HAS_TIKTOKEN = False
 def generate_text(prompt="Hello", max_new_tokens=20):
     model = QyuziUltimate().to(config.DEVICE)
     model.eval()
-    
-    # Load latest checkpoint if exists
     checkpoint_path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
     if os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=config.DEVICE)
         model.load_state_dict(ckpt['model_state'], strict=False)
     else:
-        print("No checkpoint found, using random weights.")
+        print("No Checkpoint Found")
 
     t = tokenizer.AutoTokenizer.get_instance()
-    # SimpleTokenizer encode returns list of ints (bytes)
     input_ids = t.encode(prompt)
     x = torch.tensor([input_ids], dtype=torch.long).to(config.DEVICE)
     
@@ -59,16 +53,13 @@ def generate_text(prompt="Hello", max_new_tokens=20):
         with torch.no_grad():
             outputs, _ = model(x, think_steps=1)
             if outputs.dim() == 4: outputs = outputs.squeeze(1)
-            logits = outputs[:, -1, :] # (B, P)
-            next_token = torch.argmax(logits, dim=-1).unsqueeze(0) # Greedy
+            logits = outputs[:, -1, :]
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(0)
             
             try:
                 x = torch.cat([x, next_token], dim=1)
             except Exception as ex:
-                print(f"DEBUG: Cat Error. x.shape={x.shape}, next_token.shape={next_token.shape}")
                 raise ex
-            
-            # Print token as we go (if printable)
             try:
                 char = t.decode([next_token.item()])
                 print(char, end="", flush=True)

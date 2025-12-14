@@ -6,7 +6,7 @@ except ImportError:
 
 class SimpleTokenizer:
     def __init__(self):
-        self.vocab_size = 258  # 256 byte + EOT + PAD
+        self.vocab_size = 258
         self.eot_token = 256 
         self.pad_token = 257
 

@@ -22,7 +22,6 @@ except ImportError:
 
 class KnowledgeGapDetector:
     def find_gaps(self, topic):
-        # Simulated gap detection
         return [f"{topic} detailed mechanism", f"{topic} history", f"{topic} future implications"]
 
 class CuriosityModel:
@@ -45,27 +44,20 @@ class CognitiveCrawler(threading.Thread):
             pass
 
     def clean_content(self, text):
-        # Security: Sanitize input
-        # Remove script and style tags
         text = re.sub(r'<script.*?>.*?</script>', '', text, flags=re.DOTALL)
         text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.DOTALL)
-        # Remove potential event handlers and javascript: protocol
         text = re.sub(r'javascript:', '', text, flags=re.IGNORECASE)
         text = re.sub(r' on\w+="[^"]*"', '', text, flags=re.IGNORECASE)
-        # Remove suspicious long strings (potential buffer overflow attempts in bad parsers, rare but safe to crop)
         text = re.sub(r'\S{1000,}', '', text)
         return text.strip()
 
     def run(self):
-        print("Cognitive Crawler Started (Active Learning Mode)")
+        print("Cognitive Crawler Started")
         while True:
             try:
                 base_topic = random.choice(self.topics)
-                
-                # Active Learning: Find gaps and prioritize
                 gaps = self.knowledge_detector.find_gaps(base_topic)
                 scored_gaps = self.curiosity.compute_scores(gaps)
-                # Sort by curiosity score
                 scored_gaps.sort(key=lambda x: x[1], reverse=True)
                 
                 target_query = scored_gaps[0][0]
@@ -73,8 +65,6 @@ class CognitiveCrawler(threading.Thread):
                 content = ""
                 if HAS_DDG:
                     with DDGS() as ddgs:
-                         # Use list() to enforce execution if generator
-                         # Fallback if text() not available or signature mismatch handled by crawl attempt
                          try:
                              results = list(ddgs.text(target_query, max_results=3))
                              for r in results:
@@ -88,10 +78,9 @@ class CognitiveCrawler(threading.Thread):
                          self.queue.put((content, []))
                     print(f"Cognitive Crawl: Ingested {len(content)} chars for '{target_query}'")
                 else:
-                    # Fallback logic could go here
                     pass
 
             except Exception as e:
                 print(f"Cognitive Crawler Error: {e}")
             
-            time.sleep(2) # Analyzing/Thinking pause
+            time.sleep(2)
