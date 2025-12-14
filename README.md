@@ -1,7 +1,5 @@
 # QYUZI: Made By HexZo
-- This Readme May Be Not Accurate Becouse Patching And I Am Too Lazy Fixing This File
 **QYUZI** is a modular, research-focused Transformer architecture aimed at exploring the frontiers of AGI through Neuro-Symbolic integration, Spiking Neural Networks (SNN), and Bio-inspired Memory consolidations.
-
 ## 🧠 Core Architecture
 
 Qyuzi implements a "Super-Stack" architecture featuring:
