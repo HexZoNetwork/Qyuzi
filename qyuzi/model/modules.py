@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from qyuzi.config import config
+import numpy as np
+import threading
 
-# --- SNN Components ---
 class SurrogateSpike(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, threshold):
@@ -15,8 +16,8 @@ class SurrogateSpike(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, threshold = ctx.saved_tensors
         grad_input = grad_output.clone()
-        # Rectangular surrogate gradient
-        spike_pseudo_grad = (torch.abs(input - threshold) < 0.5).float()
+        sigmoid = torch.sigmoid(input - threshold)
+        spike_pseudo_grad = sigmoid * (1 - sigmoid)
         return grad_input * spike_pseudo_grad, -grad_input * spike_pseudo_grad
 
 class SpikingNeuronLayer(nn.Module):
@@ -35,7 +36,6 @@ class SpikingNeuronLayer(nn.Module):
         spikes = []
         for t in range(T):
             mem = self.alpha * mem + self.fc(x[:, t])
-            # Adaptive threshold: avoid NaN if batch size is 1 by setting unbiased=False or checking dim
             if B > 1:
                 mem_std = mem.std(dim=-1, keepdim=True)
             else:
@@ -64,7 +64,6 @@ class AdvancedSpikingNeuralNetwork(nn.Module):
             h = h * (1 - self.inhibition.unsqueeze(0).unsqueeze(0))
         return h
 
-# --- VSA Components ---
 class VectorSymbolicArchitecture(nn.Module):
     def __init__(self, dim=10000, seed_dim=512, num_symbols=1000):
         super().__init__()
@@ -114,7 +113,6 @@ class VectorSymbolicArchitecture(nn.Module):
         query_norm = F.normalize(query_hv, dim=-1)
         sim = torch.matmul(query_norm, codebook_norm.T)
         return sim
-import threading
 
 class DreamConsolidationEngine(nn.Module):
     def __init__(self, hidden_dim, memory_size=50000, compression_ratio=4, num_dream_cycles=10):
@@ -122,10 +120,10 @@ class DreamConsolidationEngine(nn.Module):
         self.memory_size = memory_size
         self.compressed_dim = hidden_dim // compression_ratio
         self.num_dream_cycles = num_dream_cycles
-        # Offload to CPU
-        self.episodic_memory = torch.zeros(memory_size, hidden_dim, device='cpu')
-        self.memory_importance = torch.zeros(memory_size, device='cpu')
+        self.episodic_memory = np.zeros((memory_size, hidden_dim), dtype=np.float32)
+        self.memory_importance = np.zeros(memory_size, dtype=np.float32)
         self.write_ptr = 0
+        self.lock = threading.Lock()
         
         self.encoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -154,17 +152,22 @@ class DreamConsolidationEngine(nn.Module):
         imp_cpu = importance.detach().cpu()
         num_items = states_cpu.size(0)
         indices = [(self.write_ptr + i) % self.memory_size for i in range(num_items)]
-        for i, idx in enumerate(indices):
-             self.episodic_memory[idx] = states_cpu[i]
-             self.memory_importance[idx] = imp_cpu[i]
-        self.write_ptr += num_items
+        
+        with self.lock:
+             for i, idx in enumerate(indices):
+                  self.episodic_memory[idx] = states_cpu[i]
+                  self.memory_importance[idx] = imp_cpu[i]
+             self.write_ptr += num_items
     
     def dream(self, num_samples=100, device='cuda'):
         if self.write_ptr == 0: return torch.tensor(0.0, device=device)
         
         probs = F.softmax(self.memory_importance, dim=0)
         idx = torch.multinomial(probs, num_samples, replacement=True)
-        samples = self.episodic_memory[idx].to(device)
+        
+        with self.lock:
+             samples = self.episodic_memory[idx].clone().to(device)
+             imp_values = self.memory_importance[idx].clone()
         
         encoded = self.encoder(samples)
         mu, logvar = encoded.chunk(2, dim=-1)
@@ -181,7 +184,8 @@ class DreamConsolidationEngine(nn.Module):
         total_error = recon_loss + 0.1 * world_loss + 0.001 * kl_loss
         with torch.no_grad():
              err_cpu = total_error.detach().cpu()
-             self.memory_importance[idx] = 0.9 * self.memory_importance[idx] + 0.1 * err_cpu
+             with self.lock:
+                  self.memory_importance[idx] = 0.9 * imp_values + 0.1 * err_cpu
         return total_error.mean()
     
     def consolidate(self):
@@ -226,14 +230,38 @@ class SelfModelingModule(nn.Module):
     def __init__(self, hidden_dim, num_capabilities=10):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.probe = nn.Linear(hidden_dim, num_capabilities)
+        self.analyzer = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, num_capabilities)
+        )
+        self.confidence_head = nn.Linear(num_capabilities, 1)
         
     def forward(self, x):
-         return self.probe(x)
+        features = x.mean(dim=1) 
+        capabilities = torch.sigmoid(self.analyzer(features))
+        confidence = torch.sigmoid(self.confidence_head(capabilities))
+        return capabilities, confidence
 
 class RecursiveSelfImprovement(nn.Module):
     def __init__(self, hidden_dim, num_iterations=5):
         super().__init__()
-        self.net = nn.Linear(hidden_dim, hidden_dim)
-    def forward(self, x):
-        return {'improvements': torch.tanh(self.net(x))}
+        self.meta_controller = nn.GRUCell(hidden_dim, hidden_dim)
+        self.improvement_proposals = nn.Linear(hidden_dim, hidden_dim)
+        self.critic = nn.Linear(hidden_dim, 1)
+        
+    def forward(self, x, hidden_state=None):
+        B, T, H = x.shape
+        ctx = x.max(dim=1)[0]
+        
+        if hidden_state is None:
+            hidden_state = torch.zeros(B, H, device=x.device)
+            
+        new_hidden = self.meta_controller(ctx, hidden_state)
+        
+        proposal = self.improvement_proposals(new_hidden)
+        quality = torch.sigmoid(self.critic(proposal))
+        
+        optimized_state = ctx + proposal * quality
+        
+        return optimized_state.unsqueeze(1).expand(-1, T, -1), new_hidden
