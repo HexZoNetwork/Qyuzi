@@ -14,10 +14,10 @@ class EndlessDataset(Dataset):
         return 1_000_000_000 
 
     def __getitem__(self, idx):
-        tries = 0
-        while len(self.buffer) < 10:
+        # Prioritize fresh data
+        if self.queue.qsize() > 0:
             try:
-                data = self.queue.get(timeout=2)
+                data = self.queue.get_nowait()
                 if isinstance(data, tuple):
                     text, img_urls = data
                 else:
@@ -25,19 +25,17 @@ class EndlessDataset(Dataset):
                 
                 tokens = encode("<|endoftext|>" + text)
                 if len(tokens) > 100:
-                    self.buffer.append((torch.tensor(tokens), img_urls))
-                tries = 0
-            except Empty:
-                tries += 1
-                if tries > 5:
-                    if len(self.buffer) > 0:
-                        break
-                    fallback_tokens = [0] * (config.MAX_SEQ + 1)
-                    self.buffer.append((torch.tensor(fallback_tokens, dtype=torch.long), []))
-                    break
+                   self.buffer.append((torch.tensor(tokens), img_urls))
             except Exception as e:
-                print(f"Dataset Internal Error: {e}")
-                tries += 1
+                pass
+        
+        while len(self.buffer) < 10:
+             # Fallback synthetic logic if buffer empty
+             pad_token = getattr(config, 'PAD_TOKEN', 0)
+             seq_len = config.MAX_SEQ
+             x = torch.randint(0, config.VOCAB_SIZE, (seq_len,))
+             self.buffer.append((x, []))
+             break
         chunk_data = random.choice(self.buffer)
         chunk, img_urls = chunk_data
         if len(chunk) <= config.MAX_SEQ + 1:

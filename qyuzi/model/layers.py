@@ -76,13 +76,13 @@ class Context32KScaling(nn.Module):
             return [2 ** (-8 * i / n) for i in range(1, n + 1)]
         return get_slopes(num_heads)
     
-    def get_alibi_bias(self, seq_len: int) -> torch.Tensor:
-        context_position = torch.arange(seq_len)[:, None].to(self.alibi_slopes.device)
-        memory_position = torch.arange(seq_len)[None, :].to(self.alibi_slopes.device)
+    def get_alibi_bias(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        # Custom implementation for correct shape (num_heads, seq_len, seq_len)
+        context_position = torch.arange(seq_len, device=device)[None, :, None]
+        memory_position = torch.arange(seq_len, device=device)[None, None, :]
         relative_position = memory_position - context_position
-        relative_position = relative_position.unsqueeze(0).expand(self.num_heads, -1, -1)
-        alibi = relative_position * self.alibi_slopes.view(-1, 1, 1)
-        return alibi
+        relative_position = relative_position.expand(self.num_heads, -1, -1)
+        return relative_position * self.alibi_slopes.to(device).view(-1, 1, 1)
     
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, H = q.shape
@@ -99,7 +99,7 @@ class Context32KScaling(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
-        alibi_bias = self.get_alibi_bias(T).to(q.device)
+        alibi_bias = self.get_alibi_bias(T, q.device)
         attn_mask = alibi_bias.unsqueeze(0)
         
         if mask is not None:

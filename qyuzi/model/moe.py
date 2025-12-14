@@ -23,7 +23,7 @@ class ScalableMoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
             self.expert_counts.zero_()
-            self.total_tokens.zero_()
+            self.total_tokens = torch.tensor(0.0, device=x.device)
             self.expert_prob_sum.zero_()
 
         B, T, H = x.shape
