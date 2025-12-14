@@ -30,6 +30,9 @@ def generate(prompt: str, max_new=200, temperature=0.8, top_k=40):
         probs = F.softmax(logits, dim=-1)
         next_id = torch.multinomial(probs, num_samples=1)
         
+        if next_id.item() == config.EOT_TOKEN: 
+             break
+             
         ids = torch.cat([ids, next_id], dim=1)
         
         print(decode(next_id[0].tolist()), end='', flush=True)

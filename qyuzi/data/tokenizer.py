@@ -6,11 +6,18 @@ except ImportError:
 
 class SimpleTokenizer:
     def __init__(self):
-        self.vocab_size = 256
+        self.vocab_size = 258  # 256 byte + EOT + PAD
         self.eot_token = 256 
+        self.pad_token = 257
 
-    def encode(self, text, allowed_special=None):
-        return list(text.encode("utf-8"))
+    def encode(self, text, max_length=None, padding=False):
+        ids = list(text.encode("utf-8"))
+        if max_length and padding:
+            if len(ids) > max_length:
+                ids = ids[:max_length]
+            else:
+                ids = ids + [self.pad_token] * (max_length - len(ids))
+        return ids
 
     def decode(self, ids):
         return bytes(ids).decode("utf-8", errors="replace")
@@ -39,5 +46,8 @@ def encode(text):
 def decode(ids):
     tokenizer = AutoTokenizer.get_instance()
     if hasattr(tokenizer, "decode"):
-        return tokenizer.decode(ids)
+        try:
+            return tokenizer.decode(ids)
+        except Exception:
+            return ""
     return ""

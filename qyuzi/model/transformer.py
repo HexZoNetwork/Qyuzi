@@ -9,8 +9,8 @@ from qyuzi.config import config
 from .layers import RMSNorm, SwiGLUMLP, Context32KScaling, RecurrentGate
 from .moe import ScalableMoE
 from .modules import (
-    AdvancedSpikingNeuralNetwork, VectorSymbolicArchitecture, DreamConsolidationEngine,
-    SelfModelingModule, RecursiveSelfImprovement, ConsciousWorkingMemory, CausalEngine
+    UnifiedCognitiveLayer, CognitiveThinkingEngine, NeurophysiologicalSleepEngine,
+    RecursiveSelfModel, ExistentialSafety
 )
 
 class NativeViT(nn.Module):
@@ -87,14 +87,14 @@ class QyuziUltimate(nn.Module):
         self.norm = RMSNorm(config.HIDDEN)
         self.lm_head = nn.Linear(config.HIDDEN, config.VOCAB_SIZE, bias=False)
         self.lm_head.weight = self.embed.weight
-
-        self.wm = ConsciousWorkingMemory(config.HIDDEN)
-        self.causal = CausalEngine(config.HIDDEN)
-        self.snn = AdvancedSpikingNeuralNetwork(config.HIDDEN, config.HIDDEN) if config.ENABLE_SNN else None
-        self.vsa = VectorSymbolicArchitecture(dim=10000, seed_dim=config.HIDDEN) if config.ENABLE_VSA else None
-        self.dream = DreamConsolidationEngine(config.HIDDEN) if config.ENABLE_DREAM else None
-        self.self_model = SelfModelingModule(config.HIDDEN) if config.ENABLE_SELFMODEL else None
-        self.self_improvement = RecursiveSelfImprovement(config.HIDDEN) if config.ENABLE_AUTONOMY else None
+        
+        # New Cognitive Architecture Components
+        self.unified_layer = UnifiedCognitiveLayer(config.HIDDEN)
+        self.thinking_engine = CognitiveThinkingEngine(config.HIDDEN, num_slots=config.COGNITIVE_MEMORY_SLOTS)
+        self.sleep_engine = NeurophysiologicalSleepEngine(config.HIDDEN) if config.ENABLE_DREAM else None
+        self.self_model = RecursiveSelfModel(config.HIDDEN, depth=config.SELF_MODEL_DEPTH) if config.ENABLE_SELFMODEL else None
+        self.safety = ExistentialSafety() if getattr(config, 'ENABLE_EXISTENTIAL_SAFETY', False) else None
+        
         if config.ENABLE_MULTIMODAL:
              try:
                   self.vision_encoder, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
@@ -107,23 +107,24 @@ class QyuziUltimate(nn.Module):
         else:
              self.vision_encoder = None
              
-        self.recurrent_gate = RecurrentGate(config.HIDDEN)
-        self.think_norm = RMSNorm(config.HIDDEN)
-
     def get_moe_loss(self):
-        if not self.moe_layers:
-            return 0.0
+        if not self.moe_layers: return 0.0
         return sum(moe.load_balancing_loss() for moe in self.moe_layers) / len(self.moe_layers)
 
     def forward(self, idx, think_steps=None, images=None, past_key_values=None):
-        if think_steps is None: 
-            think_steps = config.THINK_STEPS_TRAIN
+        if think_steps is None: think_steps = config.THINK_STEPS_TRAIN
         
         x = self.embed(idx)
         
         if config.ENABLE_MULTIMODAL and images is not None and self.vision_encoder is not None:
-             if not torch.is_tensor(images):
-                 images = torch.tensor(images)
+             if not isinstance(images, torch.Tensor):
+                 if isinstance(images, (list, tuple)):
+                     if len(images) > 0 and isinstance(images[0], torch.Tensor):
+                         images = torch.stack(images)
+                     else:
+                         images = torch.tensor(np.array(images))
+                 else:
+                     images = torch.tensor(images)
              if past_key_values is None:
                  with torch.no_grad():
                      img_feat = self.vision_encoder.encode_image(images)
@@ -135,74 +136,54 @@ class QyuziUltimate(nn.Module):
         if past_key_values is not None:
              past_len = past_key_values[0][0].shape[1]
              total_len = past_len + T
-             active_mask = self.causal_mask[past_len:total_len, :total_len]
+             # Ensure we don't exceed causal_mask bounds
+             if total_len > self.causal_mask.shape[0]:
+                 # Grow mask if needed or just clamp (assuming RoPE handles dynamic position)
+                 # Re-generate larger mask on fly if needed
+                 large_mask = torch.triu(torch.ones(total_len, total_len, device=x.device) * float('-inf'), diagonal=1)
+                 active_mask = large_mask[past_len:total_len, :total_len]
+             else:
+                 active_mask = self.causal_mask[past_len:total_len, :total_len]
         else:
              active_mask = self.causal_mask[:T, :T]
 
         if active_mask.shape[0] != T:
              active_mask = torch.triu(torch.ones(T, T + (past_len if past_key_values else 0), device=x.device) * float('-inf'), diagonal=1)
 
-        hidden_prev = None
-        tau = 3.0
-        
+        # Standard Transformer Blocks
         new_past_key_values = []
-        
-        meta_hidden = None
-
-        if past_key_values is not None:
-            think_steps = 1
-
-        for step in range(think_steps):
-            alpha = torch.exp(torch.tensor(-step / tau, device=x.device))
-            
-            if self.self_improvement:
-                improvement_context, meta_hidden = self.self_improvement(x, meta_hidden)
-                x = x + 0.1 * improvement_context
-
-            current_layer_kv = []
-            
-            for i, block in enumerate(self.blocks):
-                
-                block_past = past_key_values[i] if past_key_values else None
-                
-                if self.training and config.ENABLE_CHECKPOINTING and i % 4 == 0:
-                     x, kv = torch.utils.checkpoint.checkpoint(block, x, active_mask, block_past, use_reentrant=False)
-                else:
-                     x, kv = block(x, mask=active_mask, past_key_value=block_past)
-                
-                current_layer_kv.append(kv)
-
-            if self.self_model:
-                capabilities, confidence = self.self_model(x)
-                adaptive_scale = confidence.view(-1, 1, 1)
+        for i, block in enumerate(self.blocks):
+            block_past = past_key_values[i] if past_key_values else None
+            if self.training and config.ENABLE_CHECKPOINTING and i % 4 == 0:
+                 x, kv = torch.utils.checkpoint.checkpoint(block, x, active_mask, block_past, use_reentrant=False)
             else:
-                adaptive_scale = 1.0
+                 x, kv = block(x, mask=active_mask, past_key_value=block_past)
+            new_past_key_values.append(kv)
 
-            if self.snn:
-                 snn_out = self.snn(x)
-                 gate = torch.sigmoid(self.lm_head(snn_out))
-                 x = x * (1 + config.SNN_FEEDBACK_SCALE * adaptive_scale * gate * snn_out.mean(dim=-1, keepdim=True))
+        # Cognitive Process: Unified Layer
+        x = self.unified_layer(x)
+
+        # Cognitive Process: Thinking Engine (System 2)
+        if think_steps > 0:
+            x = self.thinking_engine.think(x, max_steps=think_steps)
+
+        # Cognitive Process: Self-Modeling
+        if self.self_model:
+            confidence, analysis = self.self_model(x)
+            # Modulate based on confidence (Self-Calibration)
+            x = x * confidence.unsqueeze(-1).unsqueeze(-1)
+
+        # Experience Storage (for Sleep Engine)
+        if self.sleep_engine and self.training:
+            self.sleep_engine.store_experience(x)
             
-            x_recurrent = self.recurrent_gate(x.mean(dim=1), hidden_prev)
-            hidden_prev = x_recurrent
-            x = x + alpha * (x_recurrent.unsqueeze(1) * config.RECURRENT_RESIDUAL_SCALE)
-            
-            wm_out = self.wm(x.mean(1))
-            x = x + wm_out
-            
-            if T > 3:
-                c = x[:, :-3].mean(1)
-                e = x[:, 3:].mean(1)
-                prob = self.causal(c, e)[:, 1]
-                x[:, 3:] += config.CAUSAL_BRANCH_SCALE * x[:, :-3] * prob.unsqueeze(-1).unsqueeze(-1)
-            
-            x = self.think_norm(x)
-            
-            new_past_key_values = current_layer_kv
-            
-        if self.dream and self.training:
-            importance = torch.rand(x.shape[0], T, device=x.device)
-            self.dream.store_experience(x.detach(), importance, vsa=self.vsa)
+        # Phase 4: Existential Safety Check
+        if self.safety is not None:
+             is_safe, msg = self.safety.check(x)
+             if not is_safe:
+                  # Emergency dampening
+                  x = x * 0.1
+                  print(f"SAFETY INTERVENTION: {msg}")
 
         return self.lm_head(self.norm(x)), new_past_key_values
 
@@ -213,19 +194,28 @@ class QyuziUltimate(nn.Module):
             'version': config.VERSION
         }
         if optimizer: checkpoint['optimizer_state'] = optimizer.state_dict()
+        if not os.path.exists(config.CHECKPOINT_DIR): os.makedirs(config.CHECKPOINT_DIR)
         
-        if not os.path.exists(config.CHECKPOINT_DIR):
-            os.makedirs(config.CHECKPOINT_DIR)
-            
-        path = os.path.join(config.CHECKPOINT_DIR, f"qyuzi_{config.VERSION}_step{step}.pt")
-        torch.save(checkpoint, path)
-        latest_path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
-        torch.save(checkpoint, latest_path)
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            path = os.path.join(config.CHECKPOINT_DIR, f"qyuzi_{config.VERSION}_step{step}.pt")
+            torch.save(checkpoint, path)
+            latest_path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
+            torch.save(checkpoint, latest_path)
     
     def load_checkpoint(self, path=None):
         if path is None: path = os.path.join(config.CHECKPOINT_DIR, "qyuzi_latest.pt")
         if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=config.DEVICE)
+            try:
+                # Security: Attempt to use weights_only=True (PyTorch 2.4+) to prevent RCE
+                checkpoint = torch.load(path, map_location=config.DEVICE, weights_only=True)
+            except TypeError:
+                # Fallback for older PyTorch versions (Risk accepted due to env limitations)
+                print("Warning: Loading checkpoint without weights_only=True (Update PyTorch for security)")
+                checkpoint = torch.load(path, map_location=config.DEVICE)
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                return None
+                
             self.load_state_dict(checkpoint['model_state'], strict=False)
             print(f"Loaded checkpoint from {path}")
             return checkpoint
